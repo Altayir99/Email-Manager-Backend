@@ -1,0 +1,35 @@
+services:
+  postgres-email:
+    image: postgres:16-alpine
+    container_name: email-manager-postgres
+    environment:
+      POSTGRES_DB: email_manager_db
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - /opt/email-manager/postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d email_manager_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  spring-email-app:
+    build: .
+    container_name: email-manager-spring
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      DB_URL: jdbc:postgresql://postgres-email:5432/email_manager_db
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+    depends_on:
+      postgres-email:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - /opt/email-manager/logs:/app/logs

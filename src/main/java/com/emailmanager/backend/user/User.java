@@ -30,4 +30,8 @@ public class User {
     @Column(nullable = false)
     @Builder.Default
     private LocalDateTime createdAt = LocalDateTime.now();
+
+    /** Firebase Cloud Messaging device token — updated on each app launch */
+    @Column
+    private String fcmToken;
 }

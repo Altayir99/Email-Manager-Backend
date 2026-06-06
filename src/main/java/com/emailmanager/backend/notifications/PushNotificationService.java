@@ -9,6 +9,9 @@ import com.google.firebase.messaging.Notification;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.Resource;
+import java.io.File;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
@@ -33,8 +36,16 @@ public class PushNotificationService {
         }
         try {
             if (FirebaseApp.getApps().isEmpty()) {
+                // Try mounted file path first (Docker prod), then classpath (local dev)
+                Resource firebaseResource;
+                File mountedFile = new File("/app/firebase-service-account.json");
+                if (mountedFile.exists()) {
+                    firebaseResource = new FileSystemResource(mountedFile);
+                } else {
+                    firebaseResource = new ClassPathResource("firebase-service-account.json");
+                }
                 GoogleCredentials credentials = GoogleCredentials
-                        .fromStream(new ClassPathResource("firebase-service-account.json").getInputStream())
+                        .fromStream(firebaseResource.getInputStream())
                         .createScoped("https://www.googleapis.com/auth/cloud-platform");
 
                 FirebaseOptions options = FirebaseOptions.builder()

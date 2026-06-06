@@ -32,20 +32,14 @@ public class ImapConnectionService {
      */
     public Store getStore(EmailAccount account) {
         Store existing = connectionCache.get(account.getId());
-        if (existing != null) {
-            try {
-                // Send NOOP to verify connection is truly alive
-                if (existing.isConnected()) {
-                    ((IMAPStore) existing).idle(false);
-                    return existing;
-                }
-            } catch (Exception ignored) {
-                // Connection dropped — reconnect below
-                connectionCache.remove(account.getId());
-            }
+        if (existing != null && existing.isConnected()) {
+            return existing;
         }
+        // Remove stale entry and reconnect
+        connectionCache.remove(account.getId());
         return connect(account);
     }
+
 
     /**
      * Open a fresh IMAP connection and cache it.

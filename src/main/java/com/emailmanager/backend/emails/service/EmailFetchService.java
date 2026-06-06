@@ -37,26 +37,17 @@ public class EmailFetchService {
 
         Folder[] folderList = store.getDefaultFolder().list("*");
         for (Folder folder : folderList) {
-            try {
-                folder.open(Folder.READ_ONLY);
-                int unread = folder.getUnreadMessageCount();
-                int total = folder.getMessageCount();
-                boolean hasChildren = folder.list().length > 0;
-                folders.add(new FolderDto(
-                        folder.getName(),
-                        folder.getFullName(),
-                        unread,
-                        total,
-                        hasChildren
-                ));
-                folder.close(false);
-            } catch (MessagingException e) {
-                // Some folders can't be opened (e.g. [Gmail] parent) — skip them
-                folders.add(new FolderDto(folder.getName(), folder.getFullName(), 0, 0, true));
-            }
+            // Skip non-mail-holding folders (e.g. [Gmail] parent container)
+            if ((folder.getType() & Folder.HOLDS_MESSAGES) == 0) continue;
+            folders.add(new FolderDto(
+                    folder.getName(),
+                    folder.getFullName(),
+                    0, 0, false
+            ));
         }
         return folders;
     }
+
 
     /**
      * Fetch paginated email list from a folder.

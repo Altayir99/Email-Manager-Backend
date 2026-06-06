@@ -32,8 +32,17 @@ public class ImapConnectionService {
      */
     public Store getStore(EmailAccount account) {
         Store existing = connectionCache.get(account.getId());
-        if (existing != null && existing.isConnected()) {
-            return existing;
+        if (existing != null) {
+            try {
+                // Send NOOP to verify connection is truly alive
+                if (existing.isConnected()) {
+                    ((IMAPStore) existing).idle(false);
+                    return existing;
+                }
+            } catch (Exception ignored) {
+                // Connection dropped — reconnect below
+                connectionCache.remove(account.getId());
+            }
         }
         return connect(account);
     }

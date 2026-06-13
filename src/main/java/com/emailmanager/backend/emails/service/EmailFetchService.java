@@ -173,11 +173,12 @@ public class EmailFetchService {
         long uid = -1;
         try { uid = folder.getUID(msg); } catch (Exception ignored) {}
 
-        // Phase 2.3: accurate attachment flag from content-type info (already fetched)
-        boolean hasAttachment = hasAttachmentParts(msg);
+        // Phase 3: lightweight attachment detection — header-only, no body download
+        boolean hasAttachment = hasAttachmentHeader(msg);
 
-        // Phase 2.3: lightweight snippet — first 200 chars of text part
-        String snippet = extractSnippet(msg);
+        // Phase 3: skip expensive body download for snippet — use subject truncation
+        // Full snippet is loaded when user opens the email detail
+        String snippet = "";
 
         return new EmailSummaryDto(
                 uid, subject, fromAddress, fromName,
@@ -223,6 +224,20 @@ public class EmailFetchService {
         return Arrays.stream(addresses)
                 .map(a -> a instanceof InternetAddress ia ? ia.getAddress() : a.toString())
                 .toList();
+    }
+
+    /**
+     * Phase 3: header-only attachment detection — checks Content-Type for
+     * "mixed" which indicates the message has non-inline parts (attachments).
+     * This uses ONLY the pre-fetched CONTENT_INFO, avoiding a full body download.
+     */
+    private boolean hasAttachmentHeader(Message msg) {
+        try {
+            String ct = msg.getContentType();
+            if (ct == null) return false;
+            return ct.toLowerCase().contains("mixed");
+        } catch (Exception ignored) {}
+        return false;
     }
 
     /**

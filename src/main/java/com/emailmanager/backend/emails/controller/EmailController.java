@@ -41,7 +41,7 @@ public class EmailController {
     // ---- Email List ----
 
     @GetMapping("/emails")
-    public ResponseEntity<List<EmailSummaryDto>> getEmails(
+    public ResponseEntity<EmailPageDto> getEmails(
             @AuthenticationPrincipal UserDetails user,
             @PathVariable UUID accountId,
             @RequestParam(defaultValue = "INBOX") String folder,

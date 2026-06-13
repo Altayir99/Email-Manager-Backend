@@ -9,6 +9,11 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+/**
+ * Phase 2.1: all IMAP operations now use acquireStore/releaseStore in
+ * try/finally blocks so folders are always closed and the per-account lock
+ * is always released even if an exception is thrown.
+ */
 @Service
 @RequiredArgsConstructor
 @Slf4j
@@ -32,43 +37,46 @@ public class EmailActionService {
         moveEmail(account, folderName, "[Gmail]/All Mail", uid);
     }
 
-    public void moveEmail(EmailAccount account, String fromFolderName, String toFolderName, long uid) {
+    public void moveEmail(EmailAccount account, String fromFolderName,
+                          String toFolderName, long uid) {
+        Store store = imapConnectionService.acquireStore(account);
         try {
-            Store store = imapConnectionService.getStore(account);
             IMAPFolder fromFolder = (IMAPFolder) store.getFolder(fromFolderName);
-            Folder toFolder = store.getFolder(toFolderName);
-
+            Folder     toFolder   = store.getFolder(toFolderName);
             fromFolder.open(Folder.READ_WRITE);
-
-            Message msg = fromFolder.getMessageByUID(uid);
-            if (msg == null) {
-                fromFolder.close(false);
-                throw new AccountConnectionException("Message not found: " + uid);
+            try {
+                Message msg = fromFolder.getMessageByUID(uid);
+                if (msg == null) throw new AccountConnectionException("Message not found: " + uid);
+                fromFolder.copyMessages(new Message[]{msg}, toFolder);
+                msg.setFlag(Flags.Flag.DELETED, true);
+                fromFolder.expunge();
+                log.info("Moved message {} from {} to {}", uid, fromFolderName, toFolderName);
+            } finally {
+                if (fromFolder.isOpen()) fromFolder.close(true);
             }
-
-            fromFolder.copyMessages(new Message[]{msg}, toFolder);
-            msg.setFlag(Flags.Flag.DELETED, true);
-            fromFolder.expunge();
-            fromFolder.close(true);
-
-            log.info("Moved message {} from {} to {}", uid, fromFolderName, toFolderName);
         } catch (MessagingException e) {
             throw new AccountConnectionException("Failed to move email: " + e.getMessage(), e);
+        } finally {
+            imapConnectionService.releaseStore(account.getId());
         }
     }
 
-    private void setFlag(EmailAccount account, String folderName, long uid, Flags.Flag flag, boolean value) {
+    private void setFlag(EmailAccount account, String folderName,
+                         long uid, Flags.Flag flag, boolean value) {
+        Store store = imapConnectionService.acquireStore(account);
         try {
-            Store store = imapConnectionService.getStore(account);
             IMAPFolder folder = (IMAPFolder) store.getFolder(folderName);
             folder.open(Folder.READ_WRITE);
-            Message msg = folder.getMessageByUID(uid);
-            if (msg != null) {
-                msg.setFlag(flag, value);
+            try {
+                Message msg = folder.getMessageByUID(uid);
+                if (msg != null) msg.setFlag(flag, value);
+            } finally {
+                if (folder.isOpen()) folder.close(true);
             }
-            folder.close(true);
         } catch (MessagingException e) {
             throw new AccountConnectionException("Failed to update flag: " + e.getMessage(), e);
+        } finally {
+            imapConnectionService.releaseStore(account.getId());
         }
     }
 }

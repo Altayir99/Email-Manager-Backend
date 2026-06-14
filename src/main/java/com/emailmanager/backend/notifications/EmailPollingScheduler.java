@@ -40,7 +40,7 @@ public class EmailPollingScheduler {
     private final java.util.concurrent.Semaphore pollSemaphore =
             new java.util.concurrent.Semaphore(MAX_CONCURRENT_POLLS, true);
 
-    @Scheduled(fixedDelay = 60_000)
+    @Scheduled(fixedDelay = 30_000)
     public void pollAllAccounts() {
         List<EmailAccount> accounts = accountRepository.findAllWithUser();
         for (EmailAccount account : accounts) {

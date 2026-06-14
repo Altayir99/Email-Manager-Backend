@@ -42,6 +42,9 @@ app:
     enabled: true
   cors:
     allowed-origins: http://localhost:3000,http://localhost:8080
+  admin:
+    username: Andy
+    password: admin123
 
 server:
   port: 8082
@@ -78,6 +81,9 @@ app:
     enabled: true
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
+  admin:
+    username: ${APP_USERNAME}
+    password: ${APP_PASSWORD}
 
 server:
   port: 8082

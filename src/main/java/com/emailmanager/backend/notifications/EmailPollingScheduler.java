@@ -14,14 +14,25 @@ import org.springframework.stereotype.Component;
 import java.time.LocalDateTime;
 import java.util.Date;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.*;
 
 /**
- * Polls each email account's INBOX every 60 seconds for new emails.
- * Triggers FCM push when unseen emails are detected since last poll.
+ * Polls each email account's INBOX for new emails and sends FCM push notifications.
  *
- * Fix: reads the real FCM token from account.getUser().getFcmToken()
- * instead of passing null. Skips accounts with no registered token.
+ * Architecture (scales to 10 accounts):
+ *
+ *  Previously: sequential loop — 10 accounts × ~1.5s each = ~15s per cycle.
+ *  Now: parallel thread pool — ceil(10 / MAX_CONCURRENT) batches × ~2s = ~4s per cycle,
+ *  followed by fixedDelay rest. Effective notification latency ≈ 4s + 15s + FCM ≈ 20s worst case.
+ *
+ *  Concurrency model:
+ *   - pollExecutor: fixed thread pool of MAX_CONCURRENT threads → true parallel IMAP I/O
+ *   - pollSemaphore: secondary guard so the IMAP connection pool isn't overwhelmed
+ *     even if called from multiple scheduler threads in future
+ *   - ReentrantLock inside ImapConnectionService: per-account serialisation (unchanged)
+ *
+ *  fixedDelay = 15s: waits for ALL accounts to finish before starting the next cycle.
+ *  With 5 parallel threads and 10 accounts, one cycle takes ~4s → rest 15s → ~19s total.
  */
 @Component
 @RequiredArgsConstructor
@@ -32,29 +43,75 @@ public class EmailPollingScheduler {
     private final ImapConnectionService imapConnectionService;
     private final PushNotificationService pushService;
 
-    // Track last check time per account UUID
+    // Last poll timestamp per account, shared across threads safely
     private final ConcurrentHashMap<String, LocalDateTime> lastChecked = new ConcurrentHashMap<>();
 
-    // Cap concurrent IMAP polls to avoid hitting Gmail's ~15 connection limit
-    private static final int MAX_CONCURRENT_POLLS = 3;
-    private final java.util.concurrent.Semaphore pollSemaphore =
-            new java.util.concurrent.Semaphore(MAX_CONCURRENT_POLLS, true);
+    // ── Concurrency config ────────────────────────────────────────────────────
 
-    @Scheduled(fixedDelay = 30_000)
+    // How many accounts to poll truly in parallel.
+    // 5 is safe for Gmail (~15 connection limit per account, and we have multiple accounts).
+    private static final int MAX_CONCURRENT = 5;
+
+    // Thread pool — dedicated to IMAP polling so it doesn't interfere with
+    // request-handling threads. Named threads make logs easier to read.
+    private final ExecutorService pollExecutor = Executors.newFixedThreadPool(
+            MAX_CONCURRENT,
+            r -> {
+                Thread t = new Thread(r, "email-poll-" + System.nanoTime() % 100);
+                t.setDaemon(true);
+                return t;
+            });
+
+    // Semaphore guards against concurrent scheduler invocations (edge case)
+    private final Semaphore pollSemaphore = new Semaphore(MAX_CONCURRENT, true);
+
+    // ── Scheduler ─────────────────────────────────────────────────────────────
+
+    /**
+     * Polls all accounts in parallel. fixedDelay means the next cycle doesn't start
+     * until this one fully completes, so there's never an overlap.
+     *
+     * With MAX_CONCURRENT=5:
+     *   5 accounts  → 1 parallel batch  → ~2s poll + 15s rest = 17s cycle
+     *   10 accounts → 2 parallel batches → ~4s poll + 15s rest = 19s cycle
+     */
+    @Scheduled(fixedDelay = 15_000)
     public void pollAllAccounts() {
         List<EmailAccount> accounts = accountRepository.findAllWithUser();
-        for (EmailAccount account : accounts) {
-            try {
-                pollAccount(account);
-            } catch (Exception e) {
-                log.warn("[Poll] Error polling {}: {}", account.getEmailAddress(), e.getMessage());
-            }
+        if (accounts.isEmpty()) return;
+
+        log.debug("[Poll] Starting cycle for {} accounts", accounts.size());
+        long start = System.currentTimeMillis();
+
+        // Submit all accounts to the thread pool simultaneously
+        List<CompletableFuture<Void>> futures = accounts.stream()
+                .map(account -> CompletableFuture.runAsync(
+                        () -> safelyPollAccount(account),
+                        pollExecutor))
+                .toList();
+
+        // Wait for the entire cycle to finish before fixedDelay countdown starts
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+        log.debug("[Poll] Cycle done in {}ms", System.currentTimeMillis() - start);
+    }
+
+    // ── Per-account poll ──────────────────────────────────────────────────────
+
+    /** Wrapper that never throws — all errors are logged and swallowed per account. */
+    private void safelyPollAccount(EmailAccount account) {
+        try {
+            pollAccount(account);
+        } catch (Exception e) {
+            log.warn("[Poll] Error polling {}: {}", account.getEmailAddress(), e.getMessage());
         }
     }
 
     private void pollAccount(EmailAccount account) throws MessagingException {
+        // Semaphore tryAcquire guards against concurrent scheduler edge cases.
+        // Under normal operation (fixedDelay) this never blocks — just a safety net.
         if (!pollSemaphore.tryAcquire()) {
-            log.debug("[Poll] Skipping {} — too many concurrent polls", account.getEmailAddress());
+            log.debug("[Poll] Skipping {} — semaphore full", account.getEmailAddress());
             return;
         }
         try {
@@ -63,7 +120,7 @@ public class EmailPollingScheduler {
 
             String accountKey = account.getId().toString();
             LocalDateTime since = lastChecked.getOrDefault(accountKey,
-                    LocalDateTime.now().minusMinutes(2));
+                    LocalDateTime.now().minusMinutes(3));
             lastChecked.put(accountKey, LocalDateTime.now());
 
             Store store = imapConnectionService.acquireStore(account);
@@ -83,14 +140,15 @@ public class EmailPollingScheduler {
                         Date received = msg.getReceivedDate();
                         if (received == null) continue;
                         LocalDateTime receivedAt = received.toInstant()
-                                .atZone(java.time.ZoneId.systemDefault()).toLocalDateTime();
+                                .atZone(java.time.ZoneId.systemDefault())
+                                .toLocalDateTime();
                         if (!receivedAt.isAfter(since)) continue;
 
                         String senderName = "", senderEmail = "";
                         if (msg.getFrom() != null && msg.getFrom().length > 0) {
                             Address from = msg.getFrom()[0];
                             if (from instanceof InternetAddress ia) {
-                                senderEmail = ia.getAddress() != null ? ia.getAddress() : "";
+                                senderEmail = ia.getAddress()  != null ? ia.getAddress()  : "";
                                 senderName  = ia.getPersonal() != null ? ia.getPersonal() : senderEmail;
                             }
                         }

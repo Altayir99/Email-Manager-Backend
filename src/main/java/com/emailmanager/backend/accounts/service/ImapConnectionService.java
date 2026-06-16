@@ -7,10 +7,10 @@ import jakarta.mail.*;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.util.Arrays;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -24,6 +24,11 @@ import java.util.concurrent.locks.ReentrantLock;
  * Fix: per-account ReentrantLock ensures only one thread uses a given
  * account's Store at a time. The cached Store is reused across calls but
  * protected by the lock so concurrent access is serialised per-account.
+ *
+ * Phase 2.2 fix: use tryLock(20s) instead of lock() to prevent infinite
+ * deadlock when an IMAP TCP connection hangs (e.g. slow server, dropped
+ * network). If the lock can't be acquired in 20s we throw immediately so
+ * the Flutter client gets an error instead of spinning forever.
  */
 @Service
 @Slf4j
@@ -36,6 +41,10 @@ public class ImapConnectionService {
     // One lock per accountId — prevents concurrent use of the same Store
     private final ConcurrentHashMap<UUID, ReentrantLock> accountLocks = new ConcurrentHashMap<>();
 
+    // How long a thread waits for the per-account lock before giving up.
+    // This prevents infinite loading when another thread is stuck on a slow IMAP server.
+    private static final long LOCK_TIMEOUT_SECONDS = 20;
+
     public ImapConnectionService(EncryptionService encryptionService) {
         this.encryptionService = encryptionService;
     }
@@ -43,12 +52,31 @@ public class ImapConnectionService {
     // ── Public API ───────────────────────────────────────────────────────────
 
     /**
-     * Acquires the per-account lock and returns a connected Store.
+     * Acquires the per-account lock (with a 20s timeout) and returns a connected Store.
      * IMPORTANT: caller MUST release via releaseStore(accountId) in a finally block.
+     *
+     * @throws AccountConnectionException if the lock cannot be acquired within 20s
+     *         (indicates another thread is stuck on this account's IMAP connection)
      */
     public Store acquireStore(EmailAccount account) {
         ReentrantLock lock = accountLocks.computeIfAbsent(account.getId(), id -> new ReentrantLock());
-        lock.lock(); // blocks until lock is free
+        boolean acquired;
+        try {
+            acquired = lock.tryLock(LOCK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AccountConnectionException("Interrupted while waiting for IMAP lock: " + account.getEmailAddress(), e);
+        }
+
+        if (!acquired) {
+            log.error("[IMAP] Lock timeout for {} — another thread may be stuck. Evicting cached store.",
+                    account.getEmailAddress());
+            // Evict the potentially-dead store so the next caller gets a fresh connection
+            connectionCache.remove(account.getId());
+            throw new AccountConnectionException(
+                    "IMAP connection busy for " + account.getEmailAddress() + ". Try again shortly.");
+        }
+
         try {
             Store existing = connectionCache.get(account.getId());
             if (existing != null && existing.isConnected()) {
@@ -134,12 +162,14 @@ public class ImapConnectionService {
 
     private Session session(EmailAccount account, int timeoutMs) {
         Properties props = new Properties();
-        props.put("mail.store.protocol",          "imaps");
-        props.put("mail.imaps.host",               account.getImapHost());
-        props.put("mail.imaps.port",               account.getImapPort());
-        props.put("mail.imaps.ssl.enable",         "true");
-        props.put("mail.imaps.connectiontimeout",  String.valueOf(timeoutMs));
-        props.put("mail.imaps.timeout",            String.valueOf(timeoutMs));
+        props.put("mail.store.protocol",            "imaps");
+        props.put("mail.imaps.host",                account.getImapHost());
+        props.put("mail.imaps.port",                account.getImapPort());
+        props.put("mail.imaps.ssl.enable",          "true");
+        props.put("mail.imaps.connectiontimeout",   String.valueOf(timeoutMs)); // TCP connect
+        props.put("mail.imaps.timeout",             String.valueOf(timeoutMs)); // read timeout
+        props.put("mail.imaps.writetimeout",        String.valueOf(timeoutMs)); // write timeout (was missing!)
+        props.put("mail.imaps.connectionpooltimeout", String.valueOf(timeoutMs));
         return Session.getInstance(props);
     }
 }

@@ -29,10 +29,10 @@ spring:
     database-platform: org.hibernate.dialect.H2Dialect
     hibernate:
       ddl-auto: create-drop
-    show-sql: true
+    show-sql: false
 
   flyway:
-    enabled: false
+    enabled: false   # H2 dev uses ddl-auto; Flyway runs on prod Postgres only
 
 app:
   jwt-secret: dev-secret-key-change-in-production-must-be-256-bits-long-enough
@@ -45,6 +45,9 @@ app:
   admin:
     username: Andy
     password: admin123
+  sync:
+    inbox-interval-ms: 30000    # how often SyncService polls each account
+    initial-sync-count: 50      # messages to seed on first sync per account
 
 server:
   port: 8082
@@ -68,10 +71,12 @@ spring:
   jpa:
     database-platform: org.hibernate.dialect.PostgreSQLDialect
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate   # Phase 1: Flyway is the single source of truth for schema
 
   flyway:
-    enabled: false
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true   # safe to run against existing DB (email_accounts already exists)
 
 app:
   jwt-secret: ${JWT_SECRET}
@@ -84,6 +89,9 @@ app:
   admin:
     username: ${APP_USERNAME}
     password: ${APP_PASSWORD}
+  sync:
+    inbox-interval-ms: 30000
+    initial-sync-count: 50
 
 server:
   port: 8082

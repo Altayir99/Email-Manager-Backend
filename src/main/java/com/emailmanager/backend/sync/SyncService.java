@@ -140,6 +140,7 @@ public class SyncService {
                         : lastSeenUid + 1;
 
                 Message[] newMessages = folder.getMessagesByUID(fetchFrom, UIDFolder.LASTUID);
+                if (newMessages == null) newMessages = new Message[0]; // null-safe: some servers return null for empty range
 
                 long maxUid = lastSeenUid;
                 if (newMessages.length > 0) {
@@ -230,7 +231,7 @@ public class SyncService {
             long windowStart = Math.max(1, uidNext - FLAG_RECONCILE_WINDOW);
 
             Message[] recentMessages = folder.getMessagesByUID(windowStart, UIDFolder.LASTUID);
-            if (recentMessages.length == 0) return;
+            if (recentMessages == null || recentMessages.length == 0) return;
 
             FetchProfile flagProfile = new FetchProfile();
             flagProfile.add(FetchProfile.Item.FLAGS);
@@ -277,6 +278,7 @@ public class SyncService {
 
             // Get all UIDs in the window from the server
             Message[] serverMessages = folder.getMessagesByUID(windowStart, UIDFolder.LASTUID);
+            if (serverMessages == null) serverMessages = new Message[0];
             FetchProfile uidProfile = new FetchProfile();
             uidProfile.add(UIDFolder.FetchProfileItem.UID);
             folder.fetch(serverMessages, uidProfile);

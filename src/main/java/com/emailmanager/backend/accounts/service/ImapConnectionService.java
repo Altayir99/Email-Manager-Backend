@@ -103,20 +103,6 @@ public class ImapConnectionService {
     }
 
     /**
-     * Convenience: get Store without locking — retained for internal single-threaded paths.
-     * @deprecated Prefer acquireStore() + releaseStore() for all new code.
-     */
-    @Deprecated
-    public Store getStore(EmailAccount account) {
-        Store existing = connectionCache.get(account.getId());
-        if (existing != null && existing.isConnected()) {
-            return existing;
-        }
-        connectionCache.remove(account.getId());
-        return connect(account);
-    }
-
-    /**
      * Test connection without caching — used during account validation (addAccount).
      */
     public void testConnection(EmailAccount account) {

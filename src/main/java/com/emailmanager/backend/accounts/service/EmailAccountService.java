@@ -5,6 +5,7 @@ import com.emailmanager.backend.accounts.dto.AddAccountRequest;
 import com.emailmanager.backend.accounts.entity.EmailAccount;
 import com.emailmanager.backend.accounts.repository.EmailAccountRepository;
 import com.emailmanager.backend.config.exception.ResourceNotFoundException;
+import com.emailmanager.backend.sync.IdleService;
 import com.emailmanager.backend.user.User;
 import com.emailmanager.backend.user.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -25,6 +26,7 @@ public class EmailAccountService {
     private final UserRepository userRepository;
     private final EncryptionService encryptionService;
     private final ImapConnectionService imapConnectionService;
+    private final IdleService idleService;
 
     public List<AccountResponse> getAccounts(String username) {
         return accountRepository.findByUserUsernameOrderByCreatedAtAsc(username)
@@ -60,6 +62,10 @@ public class EmailAccountService {
 
         accountRepository.save(account);
         log.info("Account added: {} for user {}", request.emailAddress(), username);
+
+        // Start IMAP IDLE listener immediately — no server restart needed
+        idleService.startIdleThread(account);
+
         return toResponse(account);
     }
 
@@ -68,6 +74,7 @@ public class EmailAccountService {
         EmailAccount account = accountRepository.findByIdAndUserUsername(accountId, username)
                 .orElseThrow(() -> new ResourceNotFoundException("Account not found: " + accountId));
         imapConnectionService.disconnect(accountId);
+        idleService.stopIdleThread(accountId);  // stop IDLE before deleting
         accountRepository.delete(account);
         log.info("Account deleted: {}", accountId);
     }

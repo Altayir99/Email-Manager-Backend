@@ -104,4 +104,24 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
             @Param("folder") String folder,
             @Param("q") String query,
             Pageable pageable);
+
+    /**
+     * Contact autocomplete: distinct fromAddress + fromName pairs for an account
+     * where fromAddress starts with or contains the query string.
+     * Returns Object[] rows: [fromAddress, fromName].
+     */
+    @Query("SELECT DISTINCT e.fromAddress, e.fromName FROM CachedEmail e " +
+           "WHERE e.accountId = :accountId " +
+           "AND (:q = '' OR LOWER(e.fromAddress) LIKE LOWER(CONCAT('%', :q, '%')) " +
+           "     OR LOWER(e.fromName) LIKE LOWER(CONCAT('%', :q, '%'))) " +
+           "ORDER BY e.fromAddress ASC")
+    List<Object[]> findDistinctSenders(
+            @Param("accountId") UUID accountId,
+            @Param("q") String q,
+            org.springframework.data.domain.Pageable pageable);
+
+    default List<Object[]> findDistinctSenders(UUID accountId, String q, int limit) {
+        return findDistinctSenders(accountId, q,
+                org.springframework.data.domain.PageRequest.of(0, limit));
+    }
 }

@@ -302,4 +302,53 @@ public class EmailController {
         if (raw == null || raw.isBlank()) return List.of();
         return Arrays.asList(raw.split(";"));
     }
+
+    // ── Contacts autocomplete ────────────────────────────────────────────────
+
+    /**
+     * Returns up to 20 distinct sender address+name pairs from the cached inbox
+     * that match the query prefix. Used for compose To/CC autocomplete.
+     */
+    @GetMapping("/contacts")
+    public ResponseEntity<List<Map<String, String>>> getContacts(
+            @AuthenticationPrincipal UserDetails user,
+            @PathVariable UUID accountId,
+            @RequestParam(defaultValue = "") String q) {
+
+        accountService.getAccountEntity(user.getUsername(), accountId); // auth check
+        List<Map<String, String>> contacts = cachedEmailRepo
+                .findDistinctSenders(accountId, q.trim(), 20)
+                .stream()
+                .map(row -> Map.of(
+                        "email", row[0] != null ? (String) row[0] : "",
+                        "name",  row[1] != null ? (String) row[1] : ""))
+                .toList();
+        return ResponseEntity.ok(contacts);
+    }
+
+    // ── Attachment download ──────────────────────────────────────────────────
+
+    /**
+     * Streams a single attachment from the IMAP server.
+     * Index is 0-based, matching the order in attachmentNames list.
+     */
+    @GetMapping("/emails/{uid}/attachments/{index}")
+    public ResponseEntity<org.springframework.core.io.Resource> downloadAttachment(
+            @AuthenticationPrincipal UserDetails user,
+            @PathVariable UUID accountId,
+            @PathVariable long uid,
+            @PathVariable int index,
+            @RequestParam(defaultValue = "INBOX") String folder) throws IOException, jakarta.mail.MessagingException {
+
+        EmailAccount account = accountService.getAccountEntity(user.getUsername(), accountId);
+        EmailFetchService.AttachmentData attachment = fetchService.fetchAttachment(account, folder, uid, index);
+
+        return ResponseEntity.ok()
+                .header("Content-Disposition",
+                        "attachment; filename=\"" + attachment.filename() + "\"")
+                .contentType(org.springframework.http.MediaType.parseMediaType(
+                        attachment.contentType() != null ? attachment.contentType() : "application/octet-stream"))
+                .contentLength(attachment.data().length)
+                .body(new org.springframework.core.io.ByteArrayResource(attachment.data()));
+    }
 }

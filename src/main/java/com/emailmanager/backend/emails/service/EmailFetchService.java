@@ -338,4 +338,58 @@ public class EmailFetchService {
             }
         }
     }
+
+    // ── Attachment download ───────────────────────────────────────────────────
+
+    /** Lightweight DTO for a downloaded attachment. */
+    public record AttachmentData(String filename, String contentType, byte[] data) {}
+
+    /**
+     * Fetches one attachment (0-based index) from an IMAP message by UID.
+     * Opens folder READ_ONLY — no flag changes.
+     */
+    public AttachmentData fetchAttachment(
+            EmailAccount account, String folderName, long uid, int attachIndex)
+            throws MessagingException, IOException {
+
+        Store store = imapConnectionService.acquireStore(account);
+        try {
+            IMAPFolder folder = (IMAPFolder) store.getFolder(folderName);
+            folder.open(Folder.READ_ONLY);
+            try {
+                Message msg = folder.getMessageByUID(uid);
+                if (msg == null) throw new MessagingException("Message not found: " + uid);
+                List<BodyPart> attachments = new ArrayList<>();
+                collectAttachmentParts(msg, attachments);
+                if (attachIndex < 0 || attachIndex >= attachments.size()) {
+                    throw new MessagingException("Attachment index out of range: " + attachIndex);
+                }
+                BodyPart part = attachments.get(attachIndex);
+                String filename = part.getFileName() != null ? part.getFileName() : "attachment";
+                String ct = part.getContentType();
+                try (InputStream is = part.getInputStream()) {
+                    byte[] data = is.readAllBytes();
+                    return new AttachmentData(filename, ct, data);
+                }
+            } finally {
+                if (folder.isOpen()) folder.close(false);
+            }
+        } finally {
+            imapConnectionService.releaseStore(account.getId());
+        }
+    }
+
+    private void collectAttachmentParts(Part part, List<BodyPart> result)
+            throws MessagingException, IOException {
+        if (Part.ATTACHMENT.equalsIgnoreCase(part.getDisposition()) && part instanceof BodyPart bp) {
+            result.add(bp);
+            return;
+        }
+        Object content = part.getContent();
+        if (content instanceof MimeMultipart mp) {
+            for (int i = 0; i < mp.getCount(); i++) {
+                collectAttachmentParts(mp.getBodyPart(i), result);
+            }
+        }
+    }
 }

@@ -41,11 +41,16 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class SyncService {
 
-    private static final String INBOX = "INBOX";
-    private static final int INITIAL_SYNC_COUNT  = 500;  // messages to seed on first sync (full inbox history)
-    private static final int SNIPPET_MAX          = 200;
-    private static final int FLAG_RECONCILE_WINDOW = 200;  // how many recent UIDs to reconcile
+    private static final String INBOX                  = "INBOX";
+    private static final int INITIAL_SYNC_COUNT        = 500;  // messages to seed on first sync (full inbox history)
+    private static final int INITIAL_SYNC_COUNT_SENT   = 100;  // smaller seed for Sent/Drafts
+    private static final int SNIPPET_MAX               = 200;
+    private static final int FLAG_RECONCILE_WINDOW     = 200;
     private static final int FLAG_RECONCILE_INTERVAL_MINUTES = 5;
+
+    // Folder name candidates per provider (tried in order)
+    private static final List<String> SENT_FOLDER_CANDIDATES   = List.of("[Gmail]/Sent Mail", "Sent", "Sent Items", "Sent Messages");
+    private static final List<String> DRAFTS_FOLDER_CANDIDATES = List.of("[Gmail]/Drafts", "Drafts", "Draft");
 
     private final EmailAccountRepository      accountRepository;
     private final ImapConnectionService       imapConnectionService;
@@ -188,6 +193,9 @@ public class SyncService {
 
     // ── Core sync logic ──────────────────────────────────────────────────────
 
+    /**
+     * Syncs INBOX plus Sent and Drafts folders in a single IMAP connection.
+     */
     @Transactional
     public void syncAccountInbox(EmailAccount account) throws MessagingException {
         UUID accountId = account.getId();
@@ -195,101 +203,142 @@ public class SyncService {
 
         Store store = imapConnectionService.acquireStore(account);
         try {
-            IMAPFolder folder = (IMAPFolder) store.getFolder(INBOX);
-            folder.open(Folder.READ_ONLY);
-            try {
-                long serverUidValidity = folder.getUIDValidity();
-                FolderState state = folderStateRepository
-                        .findByAccountIdAndFullName(accountId, INBOX)
-                        .orElseGet(() -> FolderState.builder()
-                                .accountId(accountId)
-                                .fullName(INBOX)
-                                .displayName("Inbox")
-                                .build());
+            // ── INBOX (with push notifications) ──────────────────────────────
+            syncFolder(account, store, INBOX, "Inbox", INITIAL_SYNC_COUNT, false);
 
-                // ── Step 1: UIDVALIDITY check ────────────────────────────────
-                if (state.getUidValidity() != null && state.getUidValidity() != serverUidValidity) {
-                    log.warn("[Sync] UIDVALIDITY changed for {} — wiping cache", account.getEmailAddress());
-                    cachedEmailRepository.deleteByAccountIdAndFolder(accountId, INBOX);
-                    state.setLastSeenUid(0L);
-                    state.setLastFlagReconcileAt(null);
-                }
-                state.setUidValidity(serverUidValidity);
-
-                // ── Step 2: Incremental fetch (new messages only) ────────────
-                long lastSeenUid = state.getLastSeenUid();
-                long fetchFrom = (lastSeenUid == 0)
-                        ? Math.max(1, folder.getUIDNext() - INITIAL_SYNC_COUNT)
-                        : lastSeenUid + 1;
-
-                Message[] newMessages = folder.getMessagesByUID(fetchFrom, UIDFolder.LASTUID);
-                if (newMessages == null) newMessages = new Message[0]; // null-safe: some servers return null for empty range
-
-                long maxUid = lastSeenUid;
-                if (newMessages.length > 0) {
-                    FetchProfile profile = new FetchProfile();
-                    profile.add(FetchProfile.Item.ENVELOPE);
-                    profile.add(FetchProfile.Item.FLAGS);
-                    profile.add(UIDFolder.FetchProfileItem.UID);
-                    profile.add(FetchProfile.Item.CONTENT_INFO);
-                    folder.fetch(newMessages, profile);
-
-                    for (Message msg : newMessages) {
-                        try {
-                            long uid = folder.getUID(msg);
-                            if (uid <= lastSeenUid) continue;
-
-                            CachedEmail cached = buildCachedEmail(msg, folder, accountId, uid);
-                            cachedEmailRepository.findByAccountIdAndFolderAndUid(accountId, INBOX, uid)
-                                    .ifPresentOrElse(
-                                            existing -> {
-                                                // Upsert: update flags + fill in To/CC if missing
-                                                existing.setSeen(cached.isSeen());
-                                                if (existing.getToAddresses() == null) {
-                                                    existing.setToAddresses(cached.getToAddresses());
-                                                }
-                                                if (existing.getCcAddresses() == null) {
-                                                    existing.setCcAddresses(cached.getCcAddresses());
-                                                }
-                                                cachedEmailRepository.save(existing);
-                                            },
-                                            () -> cachedEmailRepository.save(cached)
-                                    );
-                            if (uid > maxUid) maxUid = uid;
-                        } catch (Exception e) {
-                            log.warn("[Sync] Failed to process message: {}", e.getMessage());
-                        }
-                    }
-                    state.setLastSeenUid(maxUid);
-                }
-
-                // ── Step 3: Flag reconciliation (throttled to every 5 min) ───
-                reconcileFlags(folder, state, accountId);
-
-                // ── Step 4: Deletion detection (in the recent window) ────────
-                detectDeletions(folder, state, accountId);
-
-                // ── Step 5: Update folder counts ─────────────────────────────
-                state.setTotalCount(folder.getMessageCount());
-                state.setUnreadCount(folder.getUnreadMessageCount());
-                state.setLastSyncedAt(LocalDateTime.now(ZoneOffset.UTC));
-                folderStateRepository.save(state);
-
-                // ── Step 6: Push notifications for new mail ──────────────────
-                if (maxUid > lastSeenUid) {
-                    pushNewMailNotifications(account, accountId, maxUid);
-                }
-
-                markIdle(accountId);
-                log.debug("[Sync] {} synced — {} total, {} unread, lastUid={}",
-                        account.getEmailAddress(), state.getTotalCount(),
-                        state.getUnreadCount(), state.getLastSeenUid());
-
-            } finally {
-                if (folder.isOpen()) folder.close(false);
+            // ── Sent folder ───────────────────────────────────────────────────
+            String sentFolder = detectFolder(store, SENT_FOLDER_CANDIDATES);
+            if (sentFolder != null) {
+                syncFolder(account, store, sentFolder, "Sent", INITIAL_SYNC_COUNT_SENT, true);
             }
+
+            // ── Drafts folder ─────────────────────────────────────────────────
+            String draftsFolder = detectFolder(store, DRAFTS_FOLDER_CANDIDATES);
+            if (draftsFolder != null) {
+                syncFolder(account, store, draftsFolder, "Drafts", INITIAL_SYNC_COUNT_SENT, true);
+            }
+
+            markIdle(accountId);
         } finally {
             imapConnectionService.releaseStore(accountId);
+        }
+    }
+
+    /**
+     * Detect the first available folder from a candidate list.
+     * Returns null if none exists on the server.
+     */
+    private String detectFolder(Store store, List<String> candidates) {
+        for (String name : candidates) {
+            try {
+                Folder f = store.getFolder(name);
+                if (f.exists()) return name;
+            } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    /**
+     * Generic folder sync — runs the full 5-step pipeline for any folder.
+     * @param skipNotifications true for Sent/Drafts (no push for emails you sent yourself)
+     */
+    private void syncFolder(EmailAccount account, Store store, String folderName,
+                            String displayName, int initialCount, boolean skipNotifications)
+            throws MessagingException {
+
+        UUID accountId = account.getId();
+        IMAPFolder folder = (IMAPFolder) store.getFolder(folderName);
+        if (!folder.exists()) return;
+
+        folder.open(Folder.READ_ONLY);
+        try {
+            long serverUidValidity = folder.getUIDValidity();
+            FolderState state = folderStateRepository
+                    .findByAccountIdAndFullName(accountId, folderName)
+                    .orElseGet(() -> FolderState.builder()
+                            .accountId(accountId)
+                            .fullName(folderName)
+                            .displayName(displayName)
+                            .build());
+
+            // ── Step 1: UIDVALIDITY check ─────────────────────────────────────
+            if (state.getUidValidity() != null && state.getUidValidity() != serverUidValidity) {
+                log.warn("[Sync] UIDVALIDITY changed for {}/{} — wiping cache",
+                        account.getEmailAddress(), folderName);
+                cachedEmailRepository.deleteByAccountIdAndFolder(accountId, folderName);
+                state.setLastSeenUid(0L);
+                state.setLastFlagReconcileAt(null);
+            }
+            state.setUidValidity(serverUidValidity);
+
+            // ── Step 2: Incremental fetch (new messages only) ─────────────────
+            long lastSeenUid = state.getLastSeenUid();
+            long fetchFrom = (lastSeenUid == 0)
+                    ? Math.max(1, folder.getUIDNext() - initialCount)
+                    : lastSeenUid + 1;
+
+            Message[] newMessages = folder.getMessagesByUID(fetchFrom, UIDFolder.LASTUID);
+            if (newMessages == null) newMessages = new Message[0];
+
+            long maxUid = lastSeenUid;
+            if (newMessages.length > 0) {
+                FetchProfile profile = new FetchProfile();
+                profile.add(FetchProfile.Item.ENVELOPE);
+                profile.add(FetchProfile.Item.FLAGS);
+                profile.add(UIDFolder.FetchProfileItem.UID);
+                profile.add(FetchProfile.Item.CONTENT_INFO);
+                folder.fetch(newMessages, profile);
+
+                for (Message msg : newMessages) {
+                    try {
+                        long uid = folder.getUID(msg);
+                        if (uid <= lastSeenUid) continue;
+
+                        CachedEmail cached = buildCachedEmail(msg, folder, accountId, uid, folderName);
+                        cachedEmailRepository.findByAccountIdAndFolderAndUid(accountId, folderName, uid)
+                                .ifPresentOrElse(
+                                        existing -> {
+                                            existing.setSeen(cached.isSeen());
+                                            if (existing.getToAddresses() == null)
+                                                existing.setToAddresses(cached.getToAddresses());
+                                            if (existing.getCcAddresses() == null)
+                                                existing.setCcAddresses(cached.getCcAddresses());
+                                            cachedEmailRepository.save(existing);
+                                        },
+                                        () -> cachedEmailRepository.save(cached)
+                                );
+                        if (uid > maxUid) maxUid = uid;
+                    } catch (Exception e) {
+                        log.warn("[Sync] Failed to process message in {}/{}: {}",
+                                account.getEmailAddress(), folderName, e.getMessage());
+                    }
+                }
+                state.setLastSeenUid(maxUid);
+            }
+
+            // ── Step 3: Flag reconciliation ───────────────────────────────────
+            reconcileFlags(folder, state, accountId, folderName);
+
+            // ── Step 4: Deletion detection ────────────────────────────────────
+            detectDeletions(folder, state, accountId, folderName);
+
+            // ── Step 5: Update folder counts ──────────────────────────────────
+            state.setTotalCount(folder.getMessageCount());
+            state.setUnreadCount(folder.getUnreadMessageCount());
+            state.setLastSyncedAt(LocalDateTime.now(ZoneOffset.UTC));
+            folderStateRepository.save(state);
+
+            // ── Step 6: Push notifications (INBOX only) ───────────────────────
+            if (!skipNotifications && maxUid > lastSeenUid) {
+                pushNewMailNotifications(account, accountId, maxUid);
+            }
+
+            log.debug("[Sync] {}/{} synced — {} total, {} unread, lastUid={}",
+                    account.getEmailAddress(), folderName,
+                    state.getTotalCount(), state.getUnreadCount(), state.getLastSeenUid());
+
+        } finally {
+            if (folder.isOpen()) folder.close(false);
         }
     }
 
@@ -301,7 +350,7 @@ public class SyncService {
      * Throttled to once per FLAG_RECONCILE_INTERVAL_MINUTES to avoid
      * hammering IMAP on every 30-second cycle.
      */
-    private void reconcileFlags(IMAPFolder folder, FolderState state, UUID accountId) {
+    private void reconcileFlags(IMAPFolder folder, FolderState state, UUID accountId, String folderName) {
         LocalDateTime lastReconcile = state.getLastFlagReconcileAt();
         if (lastReconcile != null &&
                 lastReconcile.isAfter(LocalDateTime.now(ZoneOffset.UTC)
@@ -327,7 +376,7 @@ public class SyncService {
                     long uid = folder.getUID(msg);
                     boolean serverSeen = msg.isSet(Flags.Flag.SEEN);
 
-                    cachedEmailRepository.findByAccountIdAndFolderAndUid(accountId, INBOX, uid)
+                    cachedEmailRepository.findByAccountIdAndFolderAndUid(accountId, folderName, uid)
                             .ifPresent(cached -> {
                                 if (cached.isSeen() != serverSeen) {
                                     cached.setSeen(serverSeen);
@@ -341,9 +390,9 @@ public class SyncService {
             }
 
             state.setLastFlagReconcileAt(LocalDateTime.now(ZoneOffset.UTC));
-            log.debug("[Sync] Flag reconciled {} messages for account {}", updatedCount, accountId);
+            log.debug("[Sync] Flag reconciled {} messages for account {}/{}", updatedCount, accountId, folderName);
         } catch (Exception e) {
-            log.warn("[Sync] Flag reconciliation failed: {}", e.getMessage());
+            log.warn("[Sync] Flag reconciliation failed for {}: {}", folderName, e.getMessage());
         }
     }
 
@@ -354,12 +403,11 @@ public class SyncService {
      * on the server. Evict any cached rows whose UID is no longer on server.
      * Only checks within the FLAG_RECONCILE_WINDOW to bound IMAP work.
      */
-    private void detectDeletions(IMAPFolder folder, FolderState state, UUID accountId) {
+    private void detectDeletions(IMAPFolder folder, FolderState state, UUID accountId, String folderName) {
         try {
             long uidNext = folder.getUIDNext();
             long windowStart = Math.max(1, uidNext - FLAG_RECONCILE_WINDOW);
 
-            // Get all UIDs in the window from the server
             Message[] serverMessages = folder.getMessagesByUID(windowStart, UIDFolder.LASTUID);
             if (serverMessages == null) serverMessages = new Message[0];
             FetchProfile uidProfile = new FetchProfile();
@@ -371,23 +419,22 @@ public class SyncService {
                 try { serverUids.add(folder.getUID(msg)); } catch (Exception ignored) {}
             }
 
-            // Load cached UIDs in the same window
             List<Long> cachedUids = cachedEmailRepository
-                    .findUidsByAccountIdAndFolderInRange(accountId, INBOX, windowStart, uidNext);
+                    .findUidsByAccountIdAndFolderInRange(accountId, folderName, windowStart, uidNext);
 
             int deletedCount = 0;
             for (Long cachedUid : cachedUids) {
                 if (!serverUids.contains(cachedUid)) {
-                    cachedEmailRepository.deleteByAccountIdAndFolderAndUid(accountId, INBOX, cachedUid);
+                    cachedEmailRepository.deleteByAccountIdAndFolderAndUid(accountId, folderName, cachedUid);
                     deletedCount++;
                 }
             }
 
             if (deletedCount > 0) {
-                log.info("[Sync] Evicted {} deleted emails from cache for account {}", deletedCount, accountId);
+                log.info("[Sync] Evicted {} deleted emails from cache for {}/{}", deletedCount, accountId, folderName);
             }
         } catch (Exception e) {
-            log.warn("[Sync] Deletion detection failed: {}", e.getMessage());
+            log.warn("[Sync] Deletion detection failed for {}: {}", folderName, e.getMessage());
         }
     }
 
@@ -424,11 +471,10 @@ public class SyncService {
 
     // ── Builder helpers ──────────────────────────────────────────────────────
 
-    private CachedEmail buildCachedEmail(Message msg, IMAPFolder folder, UUID accountId, long uid)
+    private CachedEmail buildCachedEmail(Message msg, IMAPFolder folder, UUID accountId, long uid, String folderName)
             throws MessagingException {
         String subject = msg.getSubject() != null ? msg.getSubject() : "(no subject)";
 
-        // From
         String fromAddress = "", fromName = "";
         if (msg.getFrom() != null && msg.getFrom().length > 0) {
             Address from = msg.getFrom()[0];
@@ -438,10 +484,7 @@ public class SyncService {
             }
         }
 
-        // To recipients
         String toAddresses = extractAddresses(msg.getRecipients(Message.RecipientType.TO));
-
-        // CC recipients
         String ccAddresses = extractAddresses(msg.getRecipients(Message.RecipientType.CC));
 
         boolean seen          = msg.isSet(Flags.Flag.SEEN);
@@ -460,7 +503,7 @@ public class SyncService {
 
         return CachedEmail.builder()
                 .accountId(accountId)
-                .folder(INBOX)
+                .folder(folderName)
                 .uid(uid)
                 .messageId(messageId)
                 .subject(subject)

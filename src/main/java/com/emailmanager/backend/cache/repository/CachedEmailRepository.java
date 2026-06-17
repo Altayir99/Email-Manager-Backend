@@ -34,7 +34,7 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
             Pageable pageable);
 
     /** Optimistic write-through: mark seen after user opens or marks read. */
-    @Modifying
+    @Modifying(clearAutomatically = true)
     @Query("UPDATE CachedEmail e SET e.seen = :seen WHERE e.accountId = :accountId AND e.folder = :folder AND e.uid = :uid")
     int updateSeen(@Param("accountId") UUID accountId,
                    @Param("folder") String folder,
@@ -42,13 +42,13 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
                    @Param("seen") boolean seen);
 
     /** Bulk flag update for flag-reconciliation pass (update multiple UIDs at once). */
-    @Modifying
+    @Modifying(clearAutomatically = true)
     @Query("UPDATE CachedEmail e SET e.seen = true WHERE e.accountId = :accountId AND e.folder = :folder AND e.uid IN :uids")
     int markSeenBulk(@Param("accountId") UUID accountId,
                      @Param("folder") String folder,
                      @Param("uids") List<Long> uids);
 
-    @Modifying
+    @Modifying(clearAutomatically = true)
     @Query("UPDATE CachedEmail e SET e.seen = false WHERE e.accountId = :accountId AND e.folder = :folder AND e.uid IN :uids")
     int markUnseenBulk(@Param("accountId") UUID accountId,
                        @Param("folder") String folder,
@@ -78,4 +78,13 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
     @Query("SELECT MAX(e.uid) FROM CachedEmail e WHERE e.accountId = :accountId AND e.folder = :folder")
     Optional<Long> findMaxUidByAccountIdAndFolder(
             @Param("accountId") UUID accountId, @Param("folder") String folder);
+
+    /** Deletion detection: load cached UIDs within a UID range window. */
+    @Query("SELECT e.uid FROM CachedEmail e WHERE e.accountId = :accountId AND e.folder = :folder AND e.uid >= :uidFrom AND e.uid <= :uidTo")
+    List<Long> findUidsByAccountIdAndFolderInRange(
+            @Param("accountId") UUID accountId,
+            @Param("folder") String folder,
+            @Param("uidFrom") long uidFrom,
+            @Param("uidTo") long uidTo);
 }
+

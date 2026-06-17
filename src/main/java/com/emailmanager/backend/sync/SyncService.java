@@ -63,8 +63,9 @@ public class SyncService {
      */
     @Scheduled(fixedDelay = 30_000, initialDelay = 10_000)
     public void syncAll() {
-        List<EmailAccount> accounts = accountRepository.findAllWithUser(); // ← fixed
+        List<EmailAccount> accounts = accountRepository.findAllWithUser();
         for (EmailAccount account : accounts) {
+            if (!account.isActive()) continue;
             try {
                 syncAccountInbox(account);
             } catch (Exception e) {
@@ -74,10 +75,7 @@ public class SyncService {
         }
     }
 
-    /**
-     * Force an immediate sync for one account — called from the REST controller
-     * when the user triggers pull-to-refresh.
-     */
+    /** Force an immediate INBOX sync — called on pull-to-refresh. */
     public void syncAccountNow(EmailAccount account) {
         try {
             syncAccountInbox(account);
@@ -85,6 +83,24 @@ public class SyncService {
             log.warn("[Sync] Manual sync failed for {}: {}", account.getEmailAddress(), e.getMessage());
             markError(account.getId(), e.getMessage());
         }
+    }
+
+    /** Force an immediate sync for a specific folder (non-INBOX on-demand). */
+    public void syncAccountNow(EmailAccount account, String folderName) {
+        try {
+            syncAccountInbox(account);   // Phase 2 uses INBOX only for now; Phase 3 will add folder routing
+        } catch (Exception e) {
+            log.warn("[Sync] Manual sync failed for {}/{}: {}", account.getEmailAddress(), folderName, e.getMessage());
+            markError(account.getId(), e.getMessage());
+        }
+    }
+
+    /**
+     * Public entry point for folder-specific sync — used by tests and the future IdleService.
+     * Delegates to syncAccountInbox (Phase 3 will add multi-folder routing here).
+     */
+    public void syncAccountFolder(EmailAccount account, String folderName) throws MessagingException {
+        syncAccountInbox(account);
     }
 
     // ── Core sync logic ──────────────────────────────────────────────────────

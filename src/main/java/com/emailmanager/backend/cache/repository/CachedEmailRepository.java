@@ -104,4 +104,4 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
             @Param("folder") String folder,
             @Param("q") String query,
             Pageable pageable);
-
+}

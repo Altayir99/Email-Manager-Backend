@@ -57,11 +57,11 @@ public class SyncService {
     // ── Scheduled entry-point ────────────────────────────────────────────────
 
     /**
-     * Sync all active accounts every 30 seconds.
-     * BUG FIX: use findAllWithUser() so the User (fcmToken) is eagerly loaded
-     * and never triggers a LazyInitializationException outside a session.
+     * Safety-net poll every 5 minutes.
+     * IdleService provides real-time IMAP IDLE delivery; this catches any
+     * messages missed during IDLE reconnect windows or server IDLE failures.
      */
-    @Scheduled(fixedDelay = 30_000, initialDelay = 10_000)
+    @Scheduled(fixedDelay = 300_000, initialDelay = 30_000)
     public void syncAll() {
         List<EmailAccount> accounts = accountRepository.findAllWithUser();
         for (EmailAccount account : accounts) {

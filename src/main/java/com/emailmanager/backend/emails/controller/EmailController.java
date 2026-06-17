@@ -29,8 +29,9 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Phase 1 rewrite: ALL reads are served from the local Postgres cache.
- * IMAP is never touched on the request path for reads.
+ * Phase 2: ALL reads served from local Postgres cache.
+ * To/CC addresses are now stored in cache during sync — detail view is fully
+ * cache-served once the body has been lazy-fetched once.
  *
  * Write actions (send, mark-read, move, delete, archive) still go to IMAP
  * and are then written through to the cache immediately.

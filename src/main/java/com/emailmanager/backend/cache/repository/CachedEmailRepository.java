@@ -23,10 +23,15 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
 
     int countByAccountIdAndFolderAndSeenFalse(UUID accountId, String folder);
 
-    /** Used for flag reconciliation: load all cached UIDs for a folder window. */
+    /**
+     * Load the top N UIDs for a folder (most recent first).
+     * Used for flag reconciliation and deletion detection.
+     */
     @Query("SELECT e.uid FROM CachedEmail e WHERE e.accountId = :accountId AND e.folder = :folder ORDER BY e.uid DESC")
     List<Long> findUidsByAccountIdAndFolder(
-            @Param("accountId") UUID accountId, @Param("folder") String folder);
+            @Param("accountId") UUID accountId,
+            @Param("folder") String folder,
+            Pageable pageable);
 
     /** Optimistic write-through: mark seen after user opens or marks read. */
     @Modifying
@@ -36,11 +41,32 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
                    @Param("uid") long uid,
                    @Param("seen") boolean seen);
 
-    /** Optimistic write-through: remove row on delete/move. */
+    /** Bulk flag update for flag-reconciliation pass (update multiple UIDs at once). */
+    @Modifying
+    @Query("UPDATE CachedEmail e SET e.seen = true WHERE e.accountId = :accountId AND e.folder = :folder AND e.uid IN :uids")
+    int markSeenBulk(@Param("accountId") UUID accountId,
+                     @Param("folder") String folder,
+                     @Param("uids") List<Long> uids);
+
+    @Modifying
+    @Query("UPDATE CachedEmail e SET e.seen = false WHERE e.accountId = :accountId AND e.folder = :folder AND e.uid IN :uids")
+    int markUnseenBulk(@Param("accountId") UUID accountId,
+                       @Param("folder") String folder,
+                       @Param("uids") List<Long> uids);
+
+    /** Optimistic write-through: remove single row on delete/move. */
     @Modifying
     @Query("DELETE FROM CachedEmail e WHERE e.accountId = :accountId AND e.folder = :folder AND e.uid = :uid")
     int deleteByAccountIdAndFolderAndUid(
             @Param("accountId") UUID accountId, @Param("folder") String folder, @Param("uid") long uid);
+
+    /** Bulk evict UIDs that no longer exist on the server (deletion detection). */
+    @Modifying
+    @Query("DELETE FROM CachedEmail e WHERE e.accountId = :accountId AND e.folder = :folder AND e.uid IN :uids")
+    int deleteByAccountIdAndFolderAndUidIn(
+            @Param("accountId") UUID accountId,
+            @Param("folder") String folder,
+            @Param("uids") List<Long> uids);
 
     /** Wipe all cached emails for a folder when UIDVALIDITY changes. */
     @Modifying
@@ -48,7 +74,7 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
     void deleteByAccountIdAndFolder(
             @Param("accountId") UUID accountId, @Param("folder") String folder);
 
-    /** Count for sync high-water mark calculation. */
+    /** High-water mark for incremental sync. */
     @Query("SELECT MAX(e.uid) FROM CachedEmail e WHERE e.accountId = :accountId AND e.folder = :folder")
     Optional<Long> findMaxUidByAccountIdAndFolder(
             @Param("accountId") UUID accountId, @Param("folder") String folder);

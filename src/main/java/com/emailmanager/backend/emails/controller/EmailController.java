@@ -23,6 +23,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -147,16 +148,17 @@ public class EmailController {
         }
     }
 
-    // ── Force sync (pull-to-refresh) ─────────────────────────────────────────
+    // ── Force sync (pull-to-refresh or folder open) ─────────────────────────
 
     @PostMapping("/sync")
     public ResponseEntity<Map<String, String>> triggerSync(
             @AuthenticationPrincipal UserDetails user,
-            @PathVariable UUID accountId) {
+            @PathVariable UUID accountId,
+            @RequestParam(defaultValue = "INBOX") String folder) {
 
         EmailAccount account = accountService.getAccountEntity(user.getUsername(), accountId);
-        syncService.syncAccountNow(account);
-        return ResponseEntity.ok(Map.of("status", "synced"));
+        syncService.syncAccountNow(account, folder);
+        return ResponseEntity.ok(Map.of("status", "synced", "folder", folder));
     }
 
     // ── Send ─────────────────────────────────────────────────────────────────
@@ -259,8 +261,8 @@ public class EmailController {
                 e.getSubject(),
                 e.getFromAddress(),
                 e.getFromName(),
-                List.of(),   // to/cc not cached in metadata — use lazy fetch for full detail
-                List.of(),
+                parseAddressList(e.getToAddresses()),
+                parseAddressList(e.getCcAddresses()),
                 e.getBodyHtml(),
                 e.getBodyText(),
                 e.getReceivedAt(),
@@ -268,5 +270,11 @@ public class EmailController {
                 List.of(),
                 e.getFolder()
         );
+    }
+
+    /** Parse semicolon-delimited address string back into a list. */
+    private List<String> parseAddressList(String raw) {
+        if (raw == null || raw.isBlank()) return List.of();
+        return Arrays.asList(raw.split(";"));
     }
 }

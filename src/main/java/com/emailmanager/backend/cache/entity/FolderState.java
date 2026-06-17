@@ -45,4 +45,8 @@ public class FolderState {
 
     @Column(name = "last_synced_at")
     private LocalDateTime lastSyncedAt;
+
+    /** Timestamp of last flag-reconciliation pass. Used to throttle to once per 5 min. */
+    @Column(name = "last_flag_reconcile_at")
+    private LocalDateTime lastFlagReconcileAt;
 }

@@ -52,6 +52,16 @@ public class CachedEmail {
     @Builder.Default
     private boolean hasAttachment = false;
 
+    /**
+     * Semicolon-separated list of "Name <addr>" strings for To recipients.
+     * Populated during sync so detail view never needs an IMAP round-trip.
+     */
+    @Column(name = "to_addresses", columnDefinition = "TEXT")
+    private String toAddresses;
+
+    @Column(name = "cc_addresses", columnDefinition = "TEXT")
+    private String ccAddresses;
+
     /** Lazy-loaded on first open via GET /emails/{uid} */
     @Column(name = "body_text", columnDefinition = "TEXT")
     private String bodyText;

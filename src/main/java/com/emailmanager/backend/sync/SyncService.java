@@ -1,4 +1,4 @@
-﻿package com.emailmanager.backend.sync;
+package com.emailmanager.backend.sync;
 
 import com.emailmanager.backend.accounts.entity.EmailAccount;
 import com.emailmanager.backend.accounts.repository.EmailAccountRepository;
@@ -22,18 +22,19 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
- * Phase 1 SyncService — keeps the local Postgres cache in sync with IMAP.
+ * Phase 2 SyncService — keeps the local Postgres cache in sync with IMAP.
  *
- * All IMAP I/O lives here. Controllers read only from the DB (instant, no lock contention).
- *
- * Sync strategy:
- *  1. For each account, open INBOX.
- *  2. Check UIDVALIDITY — if changed, wipe and re-seed.
- *  3. Fetch new messages since last_seen_uid.
- *  4. Reconcile flags (seen) for the recent window.
- *  5. Push FCM for any new UID > last_notified_uid (dedup persisted in DB).
+ * Sync strategy per INBOX cycle:
+ *  1. UIDVALIDITY check — wipe + reseed on change.
+ *  2. Incremental fetch: new messages only (UID > last_seen_uid).
+ *  3. Flag reconciliation (throttled to once per 5 min): fetch flags for
+ *     the most recent FLAG_RECONCILE_WINDOW UIDs and update seen status.
+ *  4. Deletion detection: compare server UIDs in the recent window against
+ *     cached UIDs — evict rows that are no longer on the server.
+ *  5. FCM push for any new UID > last_notified_uid (dedup persisted in DB).
  */
 @Service
 @Slf4j
@@ -41,27 +42,29 @@ import java.util.*;
 public class SyncService {
 
     private static final String INBOX = "INBOX";
-    private static final int INITIAL_SYNC_COUNT = 50;  // messages to seed on first sync
-    private static final int SNIPPET_MAX = 200;
+    private static final int INITIAL_SYNC_COUNT  = 50;   // messages to seed on first sync
+    private static final int SNIPPET_MAX          = 200;
+    private static final int FLAG_RECONCILE_WINDOW = 200;  // how many recent UIDs to reconcile
+    private static final int FLAG_RECONCILE_INTERVAL_MINUTES = 5;
 
-    private final EmailAccountRepository accountRepository;
-    private final ImapConnectionService imapConnectionService;
-    private final CachedEmailRepository cachedEmailRepository;
-    private final FolderStateRepository folderStateRepository;
-    private final AccountSyncStateRepository syncStateRepository;
-    private final PushNotificationService pushNotificationService;
+    private final EmailAccountRepository      accountRepository;
+    private final ImapConnectionService       imapConnectionService;
+    private final CachedEmailRepository       cachedEmailRepository;
+    private final FolderStateRepository       folderStateRepository;
+    private final AccountSyncStateRepository  syncStateRepository;
+    private final PushNotificationService     pushNotificationService;
 
     // ── Scheduled entry-point ────────────────────────────────────────────────
 
     /**
      * Sync all active accounts every 30 seconds.
-     * Each account is independent — one failure never stalls the others.
+     * BUG FIX: use findAllWithUser() so the User (fcmToken) is eagerly loaded
+     * and never triggers a LazyInitializationException outside a session.
      */
     @Scheduled(fixedDelay = 30_000, initialDelay = 10_000)
     public void syncAll() {
-        List<EmailAccount> accounts = accountRepository.findAll();
+        List<EmailAccount> accounts = accountRepository.findAllWithUser(); // ← fixed
         for (EmailAccount account : accounts) {
-            if (!account.isActive()) continue;
             try {
                 syncAccountInbox(account);
             } catch (Exception e) {
@@ -110,15 +113,19 @@ public class SyncService {
                     log.warn("[Sync] UIDVALIDITY changed for {} — wiping cache", account.getEmailAddress());
                     cachedEmailRepository.deleteByAccountIdAndFolder(accountId, INBOX);
                     state.setLastSeenUid(0L);
+                    state.setLastFlagReconcileAt(null);
                 }
                 state.setUidValidity(serverUidValidity);
 
-                // ── Step 2: Fetch new messages since last_seen_uid ───────────
+                // ── Step 2: Incremental fetch (new messages only) ────────────
                 long lastSeenUid = state.getLastSeenUid();
-                long fetchFrom = (lastSeenUid == 0) ? Math.max(1, folder.getUIDNext() - INITIAL_SYNC_COUNT) : lastSeenUid + 1;
+                long fetchFrom = (lastSeenUid == 0)
+                        ? Math.max(1, folder.getUIDNext() - INITIAL_SYNC_COUNT)
+                        : lastSeenUid + 1;
 
                 Message[] newMessages = folder.getMessagesByUID(fetchFrom, UIDFolder.LASTUID);
 
+                long maxUid = lastSeenUid;
                 if (newMessages.length > 0) {
                     FetchProfile profile = new FetchProfile();
                     profile.add(FetchProfile.Item.ENVELOPE);
@@ -127,19 +134,23 @@ public class SyncService {
                     profile.add(FetchProfile.Item.CONTENT_INFO);
                     folder.fetch(newMessages, profile);
 
-                    long maxUid = lastSeenUid;
                     for (Message msg : newMessages) {
                         try {
                             long uid = folder.getUID(msg);
                             if (uid <= lastSeenUid) continue;
 
                             CachedEmail cached = buildCachedEmail(msg, folder, accountId, uid);
-                            // upsert — ON CONFLICT (account_id, folder, uid) handled by save
                             cachedEmailRepository.findByAccountIdAndFolderAndUid(accountId, INBOX, uid)
                                     .ifPresentOrElse(
                                             existing -> {
-                                                // update flags only
+                                                // Upsert: update flags + fill in To/CC if missing
                                                 existing.setSeen(cached.isSeen());
+                                                if (existing.getToAddresses() == null) {
+                                                    existing.setToAddresses(cached.getToAddresses());
+                                                }
+                                                if (existing.getCcAddresses() == null) {
+                                                    existing.setCcAddresses(cached.getCcAddresses());
+                                                }
                                                 cachedEmailRepository.save(existing);
                                             },
                                             () -> cachedEmailRepository.save(cached)
@@ -152,14 +163,22 @@ public class SyncService {
                     state.setLastSeenUid(maxUid);
                 }
 
-                // ── Step 3: Update folder counts ─────────────────────────────
+                // ── Step 3: Flag reconciliation (throttled to every 5 min) ───
+                reconcileFlags(folder, state, accountId);
+
+                // ── Step 4: Deletion detection (in the recent window) ────────
+                detectDeletions(folder, state, accountId);
+
+                // ── Step 5: Update folder counts ─────────────────────────────
                 state.setTotalCount(folder.getMessageCount());
                 state.setUnreadCount(folder.getUnreadMessageCount());
                 state.setLastSyncedAt(LocalDateTime.now(ZoneOffset.UTC));
                 folderStateRepository.save(state);
 
-                // ── Step 4: Push notifications for new mail ──────────────────
-                pushNewMailNotifications(account, accountId, state.getLastSeenUid());
+                // ── Step 6: Push notifications for new mail ──────────────────
+                if (maxUid > lastSeenUid) {
+                    pushNewMailNotifications(account, accountId, maxUid);
+                }
 
                 markIdle(accountId);
                 log.debug("[Sync] {} synced — {} total, {} unread, lastUid={}",
@@ -174,6 +193,103 @@ public class SyncService {
         }
     }
 
+    // ── Flag reconciliation ──────────────────────────────────────────────────
+
+    /**
+     * Fetch flags for the most recent FLAG_RECONCILE_WINDOW messages and
+     * update the seen flag in cache if it differs from the server.
+     * Throttled to once per FLAG_RECONCILE_INTERVAL_MINUTES to avoid
+     * hammering IMAP on every 30-second cycle.
+     */
+    private void reconcileFlags(IMAPFolder folder, FolderState state, UUID accountId) {
+        LocalDateTime lastReconcile = state.getLastFlagReconcileAt();
+        if (lastReconcile != null &&
+                lastReconcile.isAfter(LocalDateTime.now(ZoneOffset.UTC)
+                        .minusMinutes(FLAG_RECONCILE_INTERVAL_MINUTES))) {
+            return; // throttled — skip this cycle
+        }
+
+        try {
+            long uidNext = folder.getUIDNext();
+            long windowStart = Math.max(1, uidNext - FLAG_RECONCILE_WINDOW);
+
+            Message[] recentMessages = folder.getMessagesByUID(windowStart, UIDFolder.LASTUID);
+            if (recentMessages.length == 0) return;
+
+            FetchProfile flagProfile = new FetchProfile();
+            flagProfile.add(FetchProfile.Item.FLAGS);
+            flagProfile.add(UIDFolder.FetchProfileItem.UID);
+            folder.fetch(recentMessages, flagProfile);
+
+            int updatedCount = 0;
+            for (Message msg : recentMessages) {
+                try {
+                    long uid = folder.getUID(msg);
+                    boolean serverSeen = msg.isSet(Flags.Flag.SEEN);
+
+                    cachedEmailRepository.findByAccountIdAndFolderAndUid(accountId, INBOX, uid)
+                            .ifPresent(cached -> {
+                                if (cached.isSeen() != serverSeen) {
+                                    cached.setSeen(serverSeen);
+                                    cachedEmailRepository.save(cached);
+                                }
+                            });
+                    updatedCount++;
+                } catch (Exception e) {
+                    log.trace("[Sync] Flag reconcile skip: {}", e.getMessage());
+                }
+            }
+
+            state.setLastFlagReconcileAt(LocalDateTime.now(ZoneOffset.UTC));
+            log.debug("[Sync] Flag reconciled {} messages for account {}", updatedCount, accountId);
+        } catch (Exception e) {
+            log.warn("[Sync] Flag reconciliation failed: {}", e.getMessage());
+        }
+    }
+
+    // ── Deletion detection ───────────────────────────────────────────────────
+
+    /**
+     * Compare cached UIDs in the recent window against UIDs actually present
+     * on the server. Evict any cached rows whose UID is no longer on server.
+     * Only checks within the FLAG_RECONCILE_WINDOW to bound IMAP work.
+     */
+    private void detectDeletions(IMAPFolder folder, FolderState state, UUID accountId) {
+        try {
+            long uidNext = folder.getUIDNext();
+            long windowStart = Math.max(1, uidNext - FLAG_RECONCILE_WINDOW);
+
+            // Get all UIDs in the window from the server
+            Message[] serverMessages = folder.getMessagesByUID(windowStart, UIDFolder.LASTUID);
+            FetchProfile uidProfile = new FetchProfile();
+            uidProfile.add(UIDFolder.FetchProfileItem.UID);
+            folder.fetch(serverMessages, uidProfile);
+
+            Set<Long> serverUids = new HashSet<>();
+            for (Message msg : serverMessages) {
+                try { serverUids.add(folder.getUID(msg)); } catch (Exception ignored) {}
+            }
+
+            // Load cached UIDs in the same window
+            List<Long> cachedUids = cachedEmailRepository
+                    .findUidsByAccountIdAndFolderInRange(accountId, INBOX, windowStart, uidNext);
+
+            int deletedCount = 0;
+            for (Long cachedUid : cachedUids) {
+                if (!serverUids.contains(cachedUid)) {
+                    cachedEmailRepository.deleteByAccountIdAndFolderAndUid(accountId, INBOX, cachedUid);
+                    deletedCount++;
+                }
+            }
+
+            if (deletedCount > 0) {
+                log.info("[Sync] Evicted {} deleted emails from cache for account {}", deletedCount, accountId);
+            }
+        } catch (Exception e) {
+            log.warn("[Sync] Deletion detection failed: {}", e.getMessage());
+        }
+    }
+
     // ── Notification helper ──────────────────────────────────────────────────
 
     private void pushNewMailNotifications(EmailAccount account, UUID accountId, long currentMaxUid) {
@@ -183,7 +299,6 @@ public class SyncService {
         long lastNotified = syncState.getLastNotifiedUid();
         if (currentMaxUid <= lastNotified) return;
 
-        // Find new emails above the notification watermark
         cachedEmailRepository.findByAccountIdAndFolderOrderByReceivedAtDesc(
                 accountId, INBOX, org.springframework.data.domain.PageRequest.of(0, 10))
                 .forEach(email -> {
@@ -211,15 +326,24 @@ public class SyncService {
     private CachedEmail buildCachedEmail(Message msg, IMAPFolder folder, UUID accountId, long uid)
             throws MessagingException {
         String subject = msg.getSubject() != null ? msg.getSubject() : "(no subject)";
+
+        // From
         String fromAddress = "", fromName = "";
         if (msg.getFrom() != null && msg.getFrom().length > 0) {
             Address from = msg.getFrom()[0];
             if (from instanceof InternetAddress ia) {
-                fromAddress = ia.getAddress() != null ? ia.getAddress() : "";
-                fromName = ia.getPersonal() != null ? ia.getPersonal() : fromAddress;
+                fromAddress = ia.getAddress()  != null ? ia.getAddress()  : "";
+                fromName    = ia.getPersonal() != null ? ia.getPersonal() : fromAddress;
             }
         }
-        boolean seen = msg.isSet(Flags.Flag.SEEN);
+
+        // To recipients
+        String toAddresses = extractAddresses(msg.getRecipients(Message.RecipientType.TO));
+
+        // CC recipients
+        String ccAddresses = extractAddresses(msg.getRecipients(Message.RecipientType.CC));
+
+        boolean seen          = msg.isSet(Flags.Flag.SEEN);
         boolean hasAttachment = hasAttachmentHeader(msg);
         java.util.Date received = msg.getReceivedDate();
         LocalDateTime receivedAt = received != null
@@ -228,7 +352,6 @@ public class SyncService {
 
         String snippet = extractSnippet(msg);
 
-        // Try to get Message-ID header
         String[] messageIdHeader = null;
         try { messageIdHeader = msg.getHeader("Message-ID"); } catch (Exception ignored) {}
         String messageId = (messageIdHeader != null && messageIdHeader.length > 0)
@@ -242,12 +365,34 @@ public class SyncService {
                 .subject(subject)
                 .fromAddress(fromAddress)
                 .fromName(fromName)
+                .toAddresses(toAddresses)
+                .ccAddresses(ccAddresses)
                 .snippet(snippet)
                 .receivedAt(receivedAt)
                 .seen(seen)
                 .hasAttachment(hasAttachment)
                 .bodyLoaded(false)
                 .build();
+    }
+
+    /**
+     * Converts an array of Address objects to a semicolon-separated string
+     * in the format "Display Name <email@example.com>".
+     * Returns null if the array is null or empty.
+     */
+    private String extractAddresses(Address[] addresses) {
+        if (addresses == null || addresses.length == 0) return null;
+        return Arrays.stream(addresses)
+                .filter(a -> a instanceof InternetAddress)
+                .map(a -> {
+                    InternetAddress ia = (InternetAddress) a;
+                    String personal = ia.getPersonal();
+                    String email    = ia.getAddress() != null ? ia.getAddress() : "";
+                    return (personal != null && !personal.isBlank())
+                            ? personal + " <" + email + ">"
+                            : email;
+                })
+                .collect(Collectors.joining(";"));
     }
 
     private boolean hasAttachmentHeader(Message msg) {
@@ -314,4 +459,3 @@ public class SyncService {
         );
     }
 }
-

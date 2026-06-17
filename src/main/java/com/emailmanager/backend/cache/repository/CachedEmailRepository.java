@@ -79,12 +79,29 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
     Optional<Long> findMaxUidByAccountIdAndFolder(
             @Param("accountId") UUID accountId, @Param("folder") String folder);
 
-    /** Deletion detection: load cached UIDs within a UID range window. */
     @Query("SELECT e.uid FROM CachedEmail e WHERE e.accountId = :accountId AND e.folder = :folder AND e.uid >= :uidFrom AND e.uid <= :uidTo")
     List<Long> findUidsByAccountIdAndFolderInRange(
             @Param("accountId") UUID accountId,
             @Param("folder") String folder,
             @Param("uidFrom") long uidFrom,
             @Param("uidTo") long uidTo);
-}
+
+    /** Full deletion reconciliation: load ALL cached UIDs for a folder (batched by caller). */
+    @Query("SELECT e.uid FROM CachedEmail e WHERE e.accountId = :accountId AND e.folder = :folder ORDER BY e.uid ASC")
+    List<Long> findAllUidsByAccountIdAndFolder(
+            @Param("accountId") UUID accountId,
+            @Param("folder") String folder);
+
+    /** Full-text search across subject, sender, snippet. */
+    @Query("SELECT e FROM CachedEmail e WHERE e.accountId = :accountId AND e.folder = :folder " +
+           "AND (LOWER(e.subject) LIKE LOWER(CONCAT('%', :q, '%')) " +
+           "OR LOWER(e.fromAddress) LIKE LOWER(CONCAT('%', :q, '%')) " +
+           "OR LOWER(e.fromName) LIKE LOWER(CONCAT('%', :q, '%')) " +
+           "OR LOWER(e.snippet) LIKE LOWER(CONCAT('%', :q, '%'))) " +
+           "ORDER BY e.receivedAt DESC")
+    Page<CachedEmail> searchByAccountIdAndFolder(
+            @Param("accountId") UUID accountId,
+            @Param("folder") String folder,
+            @Param("q") String query,
+            Pageable pageable);
 

@@ -76,6 +76,79 @@ public class SyncService {
     }
 
     /**
+     * Nightly full deletion reconciliation — runs at 3 AM server time.
+     * Scans ALL cached UIDs per account/INBOX in batches of 500 against the live
+     * IMAP server, evicting any that no longer exist. This catches deletions outside
+     * the 200-UID rolling window used by the 5-min sync.
+     */
+    @Scheduled(cron = "0 0 3 * * *")
+    @Transactional
+    public void fullDeletionReconcileAll() {
+        log.info("[Sync] Starting nightly full deletion reconciliation");
+        List<EmailAccount> accounts = accountRepository.findAllWithUser();
+        int totalEvicted = 0;
+        for (EmailAccount account : accounts) {
+            if (!account.isActive()) continue;
+            try {
+                totalEvicted += fullDeletionReconcileAccount(account);
+            } catch (Exception e) {
+                log.warn("[Sync] Full reconcile failed for {}: {}", account.getEmailAddress(), e.getMessage());
+            }
+        }
+        log.info("[Sync] Nightly reconciliation complete — {} emails evicted", totalEvicted);
+    }
+
+    private int fullDeletionReconcileAccount(EmailAccount account) throws MessagingException {
+        final int BATCH_SIZE = 500;
+        Store store = imapConnectionService.acquireStore(account);
+        int evicted = 0;
+        try {
+            com.sun.mail.imap.IMAPFolder folder =
+                    (com.sun.mail.imap.IMAPFolder) store.getFolder(INBOX);
+            folder.open(jakarta.mail.Folder.READ_ONLY);
+            try {
+                List<Long> allCachedUids = cachedEmailRepository
+                        .findAllUidsByAccountIdAndFolder(account.getId(), INBOX);
+
+                // Process in batches to avoid fetching thousands of messages at once
+                for (int i = 0; i < allCachedUids.size(); i += BATCH_SIZE) {
+                    List<Long> batch = allCachedUids.subList(i, Math.min(i + BATCH_SIZE, allCachedUids.size()));
+                    long batchMin = batch.get(0);
+                    long batchMax = batch.get(batch.size() - 1);
+
+                    Message[] serverMessages = folder.getMessagesByUID(batchMin, batchMax);
+                    if (serverMessages == null) serverMessages = new Message[0];
+
+                    jakarta.mail.FetchProfile uidProfile = new jakarta.mail.FetchProfile();
+                    uidProfile.add(com.sun.mail.imap.IMAPFolder.FetchProfileItem.UID);
+                    folder.fetch(serverMessages, uidProfile);
+
+                    Set<Long> serverUids = new HashSet<>();
+                    for (Message msg : serverMessages) {
+                        try { serverUids.add(folder.getUID(msg)); } catch (Exception ignored) {}
+                    }
+
+                    List<Long> toEvict = batch.stream()
+                            .filter(uid -> uid > 0 && !serverUids.contains(uid)) // skip synthetic negative UIDs
+                            .collect(java.util.stream.Collectors.toList());
+
+                    if (!toEvict.isEmpty()) {
+                        cachedEmailRepository.deleteByAccountIdAndFolderAndUidIn(account.getId(), INBOX, toEvict);
+                        evicted += toEvict.size();
+                        log.info("[Sync] Full reconcile evicted {} emails from {} (batch {}-{})",
+                                toEvict.size(), account.getEmailAddress(), batchMin, batchMax);
+                    }
+                }
+            } finally {
+                if (folder.isOpen()) folder.close(false);
+            }
+        } finally {
+            imapConnectionService.releaseStore(account.getId());
+        }
+        return evicted;
+    }
+
+    /**
      * Force an immediate INBOX sync — called from IdleService (virtual thread) and pull-to-refresh.
      * Accepts a UUID so the account is reloaded fresh within a JPA session, avoiding
      * detached-entity / lazy-proxy errors when called from a virtual thread context.

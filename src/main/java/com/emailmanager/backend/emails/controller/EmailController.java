@@ -149,6 +149,30 @@ public class EmailController {
         }
     }
 
+    // ── Search — pure DB, no IMAP ────────────────────────────────────────────
+
+    @GetMapping("/emails/search")
+    public ResponseEntity<EmailPageDto> searchEmails(
+            @AuthenticationPrincipal UserDetails user,
+            @PathVariable UUID accountId,
+            @RequestParam String q,
+            @RequestParam(defaultValue = "INBOX") String folder,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "25") int pageSize) {
+
+        accountService.getAccountEntity(user.getUsername(), accountId); // auth check
+        if (q == null || q.isBlank()) {
+            return ResponseEntity.badRequest().build();
+        }
+
+        Page<CachedEmail> results = cachedEmailRepo.searchByAccountIdAndFolder(
+                accountId, folder, q.trim(), PageRequest.of(page, pageSize));
+
+        List<EmailSummaryDto> emails = results.stream().map(this::toSummaryDto).toList();
+        return ResponseEntity.ok(new EmailPageDto(emails, page, pageSize,
+                (int) results.getTotalElements(), results.hasNext()));
+    }
+
     // ── Force sync (pull-to-refresh or folder open) ─────────────────────────
 
     @PostMapping("/sync")

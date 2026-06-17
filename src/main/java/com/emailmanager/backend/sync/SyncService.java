@@ -124,8 +124,8 @@ public class SyncService {
                     Message[] serverMessages = folder.getMessagesByUID(batchMin, batchMax);
                     if (serverMessages == null) serverMessages = new Message[0];
 
-                    jakarta.mail.FetchProfile uidProfile = new jakarta.mail.FetchProfile();
-                    uidProfile.add(com.sun.mail.imap.IMAPFolder.FetchProfileItem.UID);
+                    FetchProfile uidProfile = new FetchProfile();
+                    uidProfile.add(UIDFolder.FetchProfileItem.UID);
                     folder.fetch(serverMessages, uidProfile);
 
                     Set<Long> serverUids = new HashSet<>();

@@ -141,8 +141,9 @@ public class IdleService {
                     if (Thread.currentThread().isInterrupted() || shuttingDown.get()) break;
 
                     // Server notified us — run incremental sync immediately
+                    // Pass UUID (not entity) so SyncService reloads it within a fresh JPA session
                     log.debug("[IDLE] Notification received for {} — triggering sync", account.getEmailAddress());
-                    syncService.syncAccountNow(account);
+                    syncService.syncAccountNow(account.getId());
 
                     // Re-open folder if server closed it (some servers close after notification)
                     if (!folder.isOpen()) {

@@ -65,7 +65,7 @@ public class EmailController {
         if (states.isEmpty()) {
             // Cache not yet populated — trigger sync and return empty for now
             EmailAccount account = accountService.getAccountEntity(user.getUsername(), accountId);
-            syncService.syncAccountNow(account);
+            syncService.syncAccountNow(accountId);
             states = folderStateRepo.findByAccountIdOrderByFullNameAsc(accountId);
         }
 
@@ -95,7 +95,7 @@ public class EmailController {
         if (cached.isEmpty() && page == 0) {
             // Cache cold — trigger a sync, then re-query
             EmailAccount account = accountService.getAccountEntity(user.getUsername(), accountId);
-            syncService.syncAccountNow(account);
+            syncService.syncAccountNow(accountId);
             cached = cachedEmailRepo.findByAccountIdAndFolderOrderByReceivedAtDesc(
                     accountId, folder, PageRequest.of(page, pageSize));
         }
@@ -158,7 +158,7 @@ public class EmailController {
             @RequestParam(defaultValue = "INBOX") String folder) {
 
         EmailAccount account = accountService.getAccountEntity(user.getUsername(), accountId);
-        syncService.syncAccountNow(account, folder);
+        syncService.syncAccountNow(accountId, folder);
         return ResponseEntity.ok(Map.of("status", "synced", "folder", folder));
     }
 

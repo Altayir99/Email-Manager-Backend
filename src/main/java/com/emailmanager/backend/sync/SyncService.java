@@ -42,7 +42,7 @@ import java.util.stream.Collectors;
 public class SyncService {
 
     private static final String INBOX = "INBOX";
-    private static final int INITIAL_SYNC_COUNT  = 50;   // messages to seed on first sync
+    private static final int INITIAL_SYNC_COUNT  = 500;  // messages to seed on first sync (full inbox history)
     private static final int SNIPPET_MAX          = 200;
     private static final int FLAG_RECONCILE_WINDOW = 200;  // how many recent UIDs to reconcile
     private static final int FLAG_RECONCILE_INTERVAL_MINUTES = 5;
@@ -75,8 +75,15 @@ public class SyncService {
         }
     }
 
-    /** Force an immediate INBOX sync — called on pull-to-refresh. */
-    public void syncAccountNow(EmailAccount account) {
+    /**
+     * Force an immediate INBOX sync — called from IdleService (virtual thread) and pull-to-refresh.
+     * Accepts a UUID so the account is reloaded fresh within a JPA session, avoiding
+     * detached-entity / lazy-proxy errors when called from a virtual thread context.
+     */
+    @Transactional
+    public void syncAccountNow(UUID accountId) {
+        EmailAccount account = accountRepository.findById(accountId).orElse(null);
+        if (account == null || !account.isActive()) return;
         try {
             syncAccountInbox(account);
         } catch (Exception e) {
@@ -86,9 +93,12 @@ public class SyncService {
     }
 
     /** Force an immediate sync for a specific folder (non-INBOX on-demand). */
-    public void syncAccountNow(EmailAccount account, String folderName) {
+    @Transactional
+    public void syncAccountNow(UUID accountId, String folderName) {
+        EmailAccount account = accountRepository.findById(accountId).orElse(null);
+        if (account == null || !account.isActive()) return;
         try {
-            syncAccountInbox(account);   // Phase 2 uses INBOX only for now; Phase 3 will add folder routing
+            syncAccountInbox(account);
         } catch (Exception e) {
             log.warn("[Sync] Manual sync failed for {}/{}: {}", account.getEmailAddress(), folderName, e.getMessage());
             markError(account.getId(), e.getMessage());

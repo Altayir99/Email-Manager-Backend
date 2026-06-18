@@ -447,24 +447,25 @@ public class SyncService {
         long lastNotified = syncState.getLastNotifiedUid();
         if (currentMaxUid <= lastNotified) return;
 
-        cachedEmailRepository.findByAccountIdAndFolderOrderByReceivedAtDesc(
-                accountId, INBOX, org.springframework.data.domain.PageRequest.of(0, 10))
-                .forEach(email -> {
-                    if (email.getUid() > lastNotified) {
-                        String fcmToken = account.getUser() != null ? account.getUser().getFcmToken() : null;
-                        if (fcmToken != null && !fcmToken.isBlank()) {
-                            pushNotificationService.sendNewEmailNotification(
-                                    fcmToken,
-                                    email.getFromName(),
-                                    email.getSubject(),
-                                    email.getSnippet(),
-                                    accountId.toString(),
-                                    INBOX,              // folder for deep-link
-                                    email.getUid()      // uid for deep-link
-                            );
-                        }
-                    }
-                });
+        // Query DB-side for emails with uid > lastNotified so we never miss
+        // a new email on a quiet account (fixes Might Capital / multi-account notification gap).
+        List<CachedEmail> newEmails = cachedEmailRepository
+                .findNewUnseenEmailsSinceUid(accountId, INBOX, lastNotified, 10);
+
+        String fcmToken = account.getUser() != null ? account.getUser().getFcmToken() : null;
+        if (fcmToken != null && !fcmToken.isBlank()) {
+            for (CachedEmail email : newEmails) {
+                pushNotificationService.sendNewEmailNotification(
+                        fcmToken,
+                        email.getFromName(),
+                        email.getSubject(),
+                        email.getSnippet(),
+                        accountId.toString(),
+                        INBOX,
+                        email.getUid()
+                );
+            }
+        }
 
         syncState.setLastNotifiedUid(currentMaxUid);
         syncState.setLastFullSyncAt(LocalDateTime.now(ZoneOffset.UTC));

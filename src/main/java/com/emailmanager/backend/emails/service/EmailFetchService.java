@@ -309,17 +309,31 @@ public class EmailFetchService {
 
     private String[] extractBody(Part part) throws MessagingException, IOException {
         String text = "", html = "";
+        String contentType = part.getContentType().toLowerCase();
         Object content = part.getContent();
+
         if (content instanceof String s) {
-            if (part.getContentType().toLowerCase().contains("html")) html = s;
+            if (contentType.contains("html")) html = s;
             else text = s;
         } else if (content instanceof MimeMultipart mp) {
-            for (int i = 0; i < mp.getCount(); i++) {
-                BodyPart bp = mp.getBodyPart(i);
-                if (Part.ATTACHMENT.equalsIgnoreCase(bp.getDisposition())) continue;
-                String[] sub = extractBody(bp);
-                if (!sub[0].isEmpty()) text = sub[0];
-                if (!sub[1].isEmpty()) html = sub[1];
+            // multipart/alternative → prefer html over plain (pick best variant)
+            if (contentType.contains("alternative")) {
+                for (int i = 0; i < mp.getCount(); i++) {
+                    BodyPart bp = mp.getBodyPart(i);
+                    String[] sub = extractBody(bp);
+                    // Last wins — text/plain first, text/html overrides (RFC order)
+                    if (!sub[0].isEmpty()) text = sub[0];
+                    if (!sub[1].isEmpty()) html = sub[1];
+                }
+            } else {
+                // multipart/mixed, multipart/related, etc.
+                for (int i = 0; i < mp.getCount(); i++) {
+                    BodyPart bp = mp.getBodyPart(i);
+                    if (Part.ATTACHMENT.equalsIgnoreCase(bp.getDisposition())) continue;
+                    String[] sub = extractBody(bp);
+                    if (!sub[0].isEmpty()) text = sub[0];
+                    if (!sub[1].isEmpty()) html = sub[1];
+                }
             }
         }
         return new String[]{text, html};

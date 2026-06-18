@@ -74,6 +74,23 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
     void deleteByAccountIdAndFolder(
             @Param("accountId") UUID accountId, @Param("folder") String folder);
 
+    /**
+     * Fetch emails with UID strictly greater than a threshold — used for push notifications
+     * so we only alert on genuinely new messages, regardless of account inbox size.
+     */
+    @Query("SELECT e FROM CachedEmail e WHERE e.accountId = :accountId AND e.folder = :folder " +
+           "AND e.uid > :sinceUid AND e.seen = false ORDER BY e.uid ASC")
+    List<CachedEmail> findNewUnseenEmailsSinceUid(
+            @Param("accountId") UUID accountId,
+            @Param("folder") String folder,
+            @Param("sinceUid") long sinceUid,
+            Pageable pageable);
+
+    default List<CachedEmail> findNewUnseenEmailsSinceUid(UUID accountId, String folder, long sinceUid, int limit) {
+        return findNewUnseenEmailsSinceUid(accountId, folder, sinceUid,
+                org.springframework.data.domain.PageRequest.of(0, limit));
+    }
+
     /** High-water mark for incremental sync. */
     @Query("SELECT MAX(e.uid) FROM CachedEmail e WHERE e.accountId = :accountId AND e.folder = :folder")
     Optional<Long> findMaxUidByAccountIdAndFolder(

@@ -69,6 +69,10 @@ public class CachedEmail {
     @Column(name = "body_html", columnDefinition = "TEXT")
     private String bodyHtml;
 
+    /** Semicolon-separated attachment filenames, populated during lazy body fetch */
+    @Column(name = "attachment_names", columnDefinition = "TEXT")
+    private String attachmentNames;
+
     @Column(name = "body_loaded", nullable = false)
     @Builder.Default
     private boolean bodyLoaded = false;

@@ -15,6 +15,6 @@ RUN mvn clean package -DskipTests -q
 # Slim JRE-only image for production
 FROM eclipse-temurin:21-jre
 WORKDIR /app
-COPY --from=builder /app/target/email-manager-backend-1.1.0.jar app.jar
+COPY --from=builder /app/target/email-manager-backend-1.2.0.jar app.jar
 EXPOSE 8082
 ENTRYPOINT ["java", "-jar", "app.jar", "--spring.config.additional-location=optional:file:/app/firebase-service-account.json"]

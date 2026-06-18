@@ -141,6 +141,10 @@ public class EmailController {
                 cached.setBodyHtml(detail.bodyHtml());
                 cached.setBodyLoaded(true);
                 cached.setSeen(true);
+                // Persist attachment names so cache-hit path returns them
+                if (detail.attachmentNames() != null && !detail.attachmentNames().isEmpty()) {
+                    cached.setAttachmentNames(String.join(";", detail.attachmentNames()));
+                }
                 cachedEmailRepo.save(cached);
             }
             return ResponseEntity.ok(detail);
@@ -281,6 +285,10 @@ public class EmailController {
     }
 
     private EmailDetailDto toDetailDto(CachedEmail e) {
+        // Parse semicolon-delimited attachment names from cache
+        List<String> attachments = (e.getAttachmentNames() != null && !e.getAttachmentNames().isBlank())
+                ? Arrays.asList(e.getAttachmentNames().split(";"))
+                : List.of();
         return new EmailDetailDto(
                 e.getUid(),
                 e.getSubject(),
@@ -292,7 +300,7 @@ public class EmailController {
                 e.getBodyText(),
                 e.getReceivedAt(),
                 e.isSeen(),
-                List.of(),
+                attachments,
                 e.getFolder()
         );
     }

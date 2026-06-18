@@ -458,7 +458,9 @@ public class SyncService {
                                     email.getFromName(),
                                     email.getSubject(),
                                     email.getSnippet(),
-                                    accountId.toString()
+                                    accountId.toString(),
+                                    INBOX,              // folder for deep-link
+                                    email.getUid()      // uid for deep-link
                             );
                         }
                     }

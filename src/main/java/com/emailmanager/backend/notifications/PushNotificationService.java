@@ -75,7 +75,9 @@ public class PushNotificationService {
             String senderName,
             String subject,
             String snippet,
-            String accountId) {
+            String accountId,
+            String folder,
+            long uid) {
 
         if (!firebaseEnabled || fcmToken == null || fcmToken.isBlank()) return;
 
@@ -109,8 +111,10 @@ public class PushNotificationService {
                     .setAndroidConfig(AndroidConfig.builder()
                             .setPriority(AndroidConfig.Priority.HIGH)
                             .build())
-                    // ── Data payload (accountId for tap navigation) ──
+                    // ── Data payload (accountId + folder + uid for tap deep-link) ──
                     .putData("accountId", accountId)
+                    .putData("folder", folder != null ? folder : "INBOX")
+                    .putData("uid", String.valueOf(uid))
                     .putData("snippet", snippet != null ? snippet : "")
                     .putData("type", "new_email")
                     .build();

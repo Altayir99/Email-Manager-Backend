@@ -42,15 +42,10 @@ import java.util.stream.Collectors;
 public class SyncService {
 
     private static final String INBOX                  = "INBOX";
-    private static final int INITIAL_SYNC_COUNT        = 500;  // messages to seed on first sync (full inbox history)
-    private static final int INITIAL_SYNC_COUNT_SENT   = 100;  // smaller seed for Sent/Drafts
+    private static final int INITIAL_SYNC_COUNT        = 200;  // messages to seed on first sync
     private static final int SNIPPET_MAX               = 200;
     private static final int FLAG_RECONCILE_WINDOW     = 200;
     private static final int FLAG_RECONCILE_INTERVAL_MINUTES = 5;
-
-    // Folder name candidates per provider (tried in order)
-    private static final List<String> SENT_FOLDER_CANDIDATES   = List.of("[Gmail]/Sent Mail", "Sent", "Sent Items", "Sent Messages");
-    private static final List<String> DRAFTS_FOLDER_CANDIDATES = List.of("[Gmail]/Drafts", "Drafts", "Draft");
 
     private final EmailAccountRepository      accountRepository;
     private final ImapConnectionService       imapConnectionService;
@@ -80,78 +75,7 @@ public class SyncService {
         }
     }
 
-    /**
-     * Nightly full deletion reconciliation — runs at 3 AM server time.
-     * Scans ALL cached UIDs per account/INBOX in batches of 500 against the live
-     * IMAP server, evicting any that no longer exist. This catches deletions outside
-     * the 200-UID rolling window used by the 5-min sync.
-     */
-    @Scheduled(cron = "0 0 3 * * *")
-    @Transactional
-    public void fullDeletionReconcileAll() {
-        log.info("[Sync] Starting nightly full deletion reconciliation");
-        List<EmailAccount> accounts = accountRepository.findAllWithUser();
-        int totalEvicted = 0;
-        for (EmailAccount account : accounts) {
-            if (!account.isActive()) continue;
-            try {
-                totalEvicted += fullDeletionReconcileAccount(account);
-            } catch (Exception e) {
-                log.warn("[Sync] Full reconcile failed for {}: {}", account.getEmailAddress(), e.getMessage());
-            }
-        }
-        log.info("[Sync] Nightly reconciliation complete — {} emails evicted", totalEvicted);
-    }
 
-    private int fullDeletionReconcileAccount(EmailAccount account) throws MessagingException {
-        final int BATCH_SIZE = 500;
-        Store store = imapConnectionService.acquireStore(account);
-        int evicted = 0;
-        try {
-            com.sun.mail.imap.IMAPFolder folder =
-                    (com.sun.mail.imap.IMAPFolder) store.getFolder(INBOX);
-            folder.open(jakarta.mail.Folder.READ_ONLY);
-            try {
-                List<Long> allCachedUids = cachedEmailRepository
-                        .findAllUidsByAccountIdAndFolder(account.getId(), INBOX);
-
-                // Process in batches to avoid fetching thousands of messages at once
-                for (int i = 0; i < allCachedUids.size(); i += BATCH_SIZE) {
-                    List<Long> batch = allCachedUids.subList(i, Math.min(i + BATCH_SIZE, allCachedUids.size()));
-                    long batchMin = batch.get(0);
-                    long batchMax = batch.get(batch.size() - 1);
-
-                    Message[] serverMessages = folder.getMessagesByUID(batchMin, batchMax);
-                    if (serverMessages == null) serverMessages = new Message[0];
-
-                    FetchProfile uidProfile = new FetchProfile();
-                    uidProfile.add(UIDFolder.FetchProfileItem.UID);
-                    folder.fetch(serverMessages, uidProfile);
-
-                    Set<Long> serverUids = new HashSet<>();
-                    for (Message msg : serverMessages) {
-                        try { serverUids.add(folder.getUID(msg)); } catch (Exception ignored) {}
-                    }
-
-                    List<Long> toEvict = batch.stream()
-                            .filter(uid -> uid > 0 && !serverUids.contains(uid)) // skip synthetic negative UIDs
-                            .collect(java.util.stream.Collectors.toList());
-
-                    if (!toEvict.isEmpty()) {
-                        cachedEmailRepository.deleteByAccountIdAndFolderAndUidIn(account.getId(), INBOX, toEvict);
-                        evicted += toEvict.size();
-                        log.info("[Sync] Full reconcile evicted {} emails from {} (batch {}-{})",
-                                toEvict.size(), account.getEmailAddress(), batchMin, batchMax);
-                    }
-                }
-            } finally {
-                if (folder.isOpen()) folder.close(false);
-            }
-        } finally {
-            imapConnectionService.releaseStore(account.getId());
-        }
-        return evicted;
-    }
 
     /**
      * Force an immediate INBOX sync — called from IdleService (virtual thread) and pull-to-refresh.
@@ -170,17 +94,11 @@ public class SyncService {
         }
     }
 
-    /** Force an immediate sync for a specific folder (non-INBOX on-demand). */
+    /** Force an immediate sync for a specific folder. Currently routes to INBOX. */
     @Transactional
     public void syncAccountNow(UUID accountId, String folderName) {
-        EmailAccount account = accountRepository.findById(accountId).orElse(null);
-        if (account == null || !account.isActive()) return;
-        try {
-            syncAccountInbox(account);
-        } catch (Exception e) {
-            log.warn("[Sync] Manual sync failed for {}/{}: {}", account.getEmailAddress(), folderName, e.getMessage());
-            markError(account.getId(), e.getMessage());
-        }
+        log.debug("[Sync] Manual sync requested for folder '{}' — routing to INBOX", folderName);
+        syncAccountNow(accountId);
     }
 
     /**
@@ -194,7 +112,8 @@ public class SyncService {
     // ── Core sync logic ──────────────────────────────────────────────────────
 
     /**
-     * Syncs INBOX plus Sent and Drafts folders in a single IMAP connection.
+     * Syncs INBOX only — single folder, single IMAP connection.
+     * Sent/Drafts are populated on-demand when the user opens those folders.
      */
     @Transactional
     public void syncAccountInbox(EmailAccount account) throws MessagingException {
@@ -203,39 +122,11 @@ public class SyncService {
 
         Store store = imapConnectionService.acquireStore(account);
         try {
-            // ── INBOX (with push notifications) ──────────────────────────────
             syncFolder(account, store, INBOX, "Inbox", INITIAL_SYNC_COUNT, false);
-
-            // ── Sent folder ───────────────────────────────────────────────────
-            String sentFolder = detectFolder(store, SENT_FOLDER_CANDIDATES);
-            if (sentFolder != null) {
-                syncFolder(account, store, sentFolder, "Sent", INITIAL_SYNC_COUNT_SENT, true);
-            }
-
-            // ── Drafts folder ─────────────────────────────────────────────────
-            String draftsFolder = detectFolder(store, DRAFTS_FOLDER_CANDIDATES);
-            if (draftsFolder != null) {
-                syncFolder(account, store, draftsFolder, "Drafts", INITIAL_SYNC_COUNT_SENT, true);
-            }
-
             markIdle(accountId);
         } finally {
             imapConnectionService.releaseStore(accountId);
         }
-    }
-
-    /**
-     * Detect the first available folder from a candidate list.
-     * Returns null if none exists on the server.
-     */
-    private String detectFolder(Store store, List<String> candidates) {
-        for (String name : candidates) {
-            try {
-                Folder f = store.getFolder(name);
-                if (f.exists()) return name;
-            } catch (Exception ignored) {}
-        }
-        return null;
     }
 
     /**

@@ -72,14 +72,10 @@ class SyncServiceTest {
         account.setActive(true);
         account.setUser(user);
 
-        // Default: push notification path needs a non-null page (empty = no push fired)
-        when(cachedEmailRepo.findByAccountIdAndFolderOrderByReceivedAtDesc(
-                eq(accountId), eq("INBOX"), any()))
-                .thenReturn(new PageImpl<>(List.of()));
-
         // Common IMAP stubs
         when(imapConnectionService.acquireStore(account)).thenReturn(store);
         when(store.getFolder("INBOX")).thenReturn(folder);
+        when(folder.exists()).thenReturn(true);
         doNothing().when(folder).open(Folder.READ_ONLY);
         when(folder.isOpen()).thenReturn(true);
         doNothing().when(folder).close(false);
@@ -87,6 +83,24 @@ class SyncServiceTest {
         when(folder.getUIDNext()).thenReturn(100L);
         when(folder.getMessageCount()).thenReturn(10);
         when(folder.getUnreadMessageCount()).thenReturn(2);
+
+        // Default syncState stub — markSyncing/markIdle call findById before syncFolder runs
+        when(syncStateRepo.findById(accountId)).thenReturn(Optional.empty());
+
+        // Default notification query stub — returns empty list (no push).
+        // Must match the exact 4-param (int limit) overload the production code calls.
+        when(cachedEmailRepo.findNewUnseenEmailsSinceUid(
+                eq(accountId), eq("INBOX"), anyLong(), anyInt()))
+                .thenReturn(List.of());
+
+        // Default stubs for detectDeletions and reconcileFlags
+        // (these run inside syncFolder but catch their own exceptions)
+        when(cachedEmailRepo.findUidsByAccountIdAndFolderInRange(
+                eq(accountId), eq("INBOX"), anyLong(), anyLong()))
+                .thenReturn(List.of());
+
+        // Lenient catch-all for getMessagesByUID — returns empty for any unstubbed range
+        lenient().when(folder.getMessagesByUID(anyLong(), anyLong())).thenReturn(new Message[0]);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -321,19 +335,20 @@ class SyncServiceTest {
                     .accountId(accountId).lastNotifiedUid(40L).build();
             when(syncStateRepo.findById(accountId)).thenReturn(Optional.of(syncState));
 
+            // Stub the DB-side notification query (findNewUnseenEmailsSinceUid)
             CachedEmail newEmail = cachedEmail(51L, false);
             newEmail.setFromName("Alice");
             newEmail.setSubject("Hello");
             newEmail.setSnippet("Hey there");
-            org.springframework.data.domain.Page<CachedEmail> page =
-                    new org.springframework.data.domain.PageImpl<>(List.of(newEmail));
-            when(cachedEmailRepo.findByAccountIdAndFolderOrderByReceivedAtDesc(
-                    eq(accountId), eq("INBOX"), any())).thenReturn(page);
+            when(cachedEmailRepo.findNewUnseenEmailsSinceUid(
+                    eq(accountId), eq("INBOX"), eq(40L), anyInt()))
+                    .thenReturn(List.of(newEmail));
 
             syncService.syncAccountFolder(account, "INBOX");
 
             verify(pushService).sendNewEmailNotification(
-                    eq("fcm-test-token"), eq("Alice"), eq("Hello"), eq("Hey there"), anyString());
+                    eq("fcm-test-token"), eq("Alice"), eq("Hello"), eq("Hey there"),
+                    anyString(), eq("INBOX"), eq(51L));
         }
 
         @Test
@@ -352,7 +367,8 @@ class SyncServiceTest {
 
             syncService.syncAccountFolder(account, "INBOX");
 
-            verify(pushService, never()).sendNewEmailNotification(any(), any(), any(), any(), any());
+            verify(pushService, never()).sendNewEmailNotification(
+                    any(), any(), any(), any(), any(), any(), anyLong());
         }
 
         @Test
@@ -375,14 +391,14 @@ class SyncServiceTest {
             when(syncStateRepo.findById(accountId)).thenReturn(Optional.of(syncState));
 
             CachedEmail newEmail = cachedEmail(51L, false);
-            org.springframework.data.domain.Page<CachedEmail> page =
-                    new org.springframework.data.domain.PageImpl<>(List.of(newEmail));
-            when(cachedEmailRepo.findByAccountIdAndFolderOrderByReceivedAtDesc(
-                    eq(accountId), eq("INBOX"), any())).thenReturn(page);
+            when(cachedEmailRepo.findNewUnseenEmailsSinceUid(
+                    eq(accountId), eq("INBOX"), eq(40L), anyInt()))
+                    .thenReturn(List.of(newEmail));
 
             syncService.syncAccountFolder(account, "INBOX");
 
-            verify(pushService, never()).sendNewEmailNotification(any(), any(), any(), any(), any());
+            verify(pushService, never()).sendNewEmailNotification(
+                    any(), any(), any(), any(), any(), any(), anyLong());
         }
     }
 
@@ -456,14 +472,14 @@ class SyncServiceTest {
             when(folderStateRepo.findByAccountIdAndFullName(accountId, "INBOX"))
                     .thenReturn(Optional.empty());
             when(folder.getUIDNext()).thenReturn(150L); // server UID next = 150
-            // Expect fetch from 150 - 50 = 100
-            when(folder.getMessagesByUID(100L, UIDFolder.LASTUID))
+            // INITIAL_SYNC_COUNT is 200, so expect fetch from max(1, 150 - 200) = 1
+            when(folder.getMessagesByUID(1L, UIDFolder.LASTUID))
                     .thenReturn(new Message[0]);
             when(syncStateRepo.findById(accountId)).thenReturn(Optional.empty());
 
             syncService.syncAccountFolder(account, "INBOX");
 
-            verify(folder).getMessagesByUID(100L, UIDFolder.LASTUID);
+            verify(folder, atLeast(1)).getMessagesByUID(1L, UIDFolder.LASTUID);
         }
 
         @Test

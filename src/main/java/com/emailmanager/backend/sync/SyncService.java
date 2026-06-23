@@ -338,7 +338,9 @@ public class SyncService {
                                     email.getFromName(),
                                     email.getSubject(),
                                     email.getSnippet(),
-                                    accountId.toString()
+                                    accountId.toString(),
+                                    INBOX,
+                                    email.getUid()
                             );
                         }
                     }

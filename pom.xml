@@ -101,15 +101,12 @@
             <version>2.0.1</version>
         </dependency>
 
-        <!-- Anthropic Java SDK (Claude AI - Phase 2 ready) -->
-        <!-- Uncomment when Phase 2 begins -->
-        <!--
+        <!-- Google GenAI SDK (Gemini 2.0 Flash) -->
         <dependency>
-            <groupId>com.anthropic</groupId>
-            <artifactId>sdk</artifactId>
-            <version>0.8.0</version>
+            <groupId>com.google.genai</groupId>
+            <artifactId>google-genai</artifactId>
+            <version>1.59.0</version>
         </dependency>
-        -->
 
         <!-- Firebase Admin SDK — for FCM push notifications -->
         <dependency>

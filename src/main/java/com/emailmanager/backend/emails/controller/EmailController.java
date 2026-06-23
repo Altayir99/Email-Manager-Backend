@@ -12,6 +12,7 @@ import com.emailmanager.backend.emails.service.EmailFetchService;
 import com.emailmanager.backend.emails.service.EmailSendService;
 import com.emailmanager.backend.sync.SyncService;
 import jakarta.validation.Valid;
+import org.springframework.web.multipart.MultipartFile;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -192,14 +193,21 @@ public class EmailController {
 
     // ── Send ─────────────────────────────────────────────────────────────────
 
-    @PostMapping("/emails/send")
+    @PostMapping(value = "/emails/send", consumes = {"multipart/form-data", "application/x-www-form-urlencoded"})
     public ResponseEntity<Map<String, String>> sendEmail(
             @AuthenticationPrincipal UserDetails user,
             @PathVariable UUID accountId,
-            @Valid @RequestBody SendEmailRequest request) {
+            @RequestParam String to,
+            @RequestParam String subject,
+            @RequestParam(required = false) String bodyText,
+            @RequestParam(required = false) String bodyHtml,
+            @RequestParam(required = false) List<String> cc,
+            @RequestParam(required = false) List<String> bcc,
+            @RequestPart(required = false) MultipartFile attachment) {
 
         EmailAccount account = accountService.getAccountEntity(user.getUsername(), accountId);
-        sendService.sendEmail(account, request);
+        SendEmailRequest request = new SendEmailRequest(to, cc, bcc, subject, bodyHtml, bodyText);
+        sendService.sendEmail(account, request, attachment);
         return ResponseEntity.ok(Map.of("status", "sent"));
     }
 

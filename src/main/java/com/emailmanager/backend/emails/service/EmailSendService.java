@@ -11,6 +11,7 @@ import jakarta.mail.internet.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -29,7 +30,19 @@ public class EmailSendService {
     private static final String GMAIL_SENT_FOLDER   = "[Gmail]/Sent Mail";
     private static final String GENERIC_SENT_FOLDER = "Sent";
 
+    /**
+     * Overload without attachment — kept for internal calls that don't need a file.
+     */
     public void sendEmail(EmailAccount account, SendEmailRequest request) {
+        sendEmail(account, request, null);
+    }
+
+    /**
+     * Send an email with an optional PDF (or any file) attachment.
+     *
+     * @param attachment nullable — when null, behaves identically to the old code
+     */
+    public void sendEmail(EmailAccount account, SendEmailRequest request, MultipartFile attachment) {
         MimeMessage message;
         Session session;
 
@@ -70,20 +83,60 @@ public class EmailSendService {
             message.setSubject(request.subject(), "UTF-8");
             message.setSentDate(new Date());
 
-            // Prefer HTML body, fallback to text
+            // ── Build body part ───────────────────────────────────────────────
+            MimeBodyPart bodyPart = new MimeBodyPart();
             if (request.bodyHtml() != null && !request.bodyHtml().isBlank()) {
-                MimeMultipart multipart = new MimeMultipart("alternative");
                 if (request.bodyText() != null && !request.bodyText().isBlank()) {
+                    // alternative: text + html
+                    MimeMultipart altMultipart = new MimeMultipart("alternative");
                     MimeBodyPart textPart = new MimeBodyPart();
                     textPart.setText(request.bodyText(), "UTF-8");
-                    multipart.addBodyPart(textPart);
+                    altMultipart.addBodyPart(textPart);
+                    MimeBodyPart htmlPart = new MimeBodyPart();
+                    htmlPart.setContent(request.bodyHtml(), "text/html; charset=UTF-8");
+                    altMultipart.addBodyPart(htmlPart);
+                    bodyPart.setContent(altMultipart);
+                } else {
+                    bodyPart.setContent(request.bodyHtml(), "text/html; charset=UTF-8");
                 }
-                MimeBodyPart htmlPart = new MimeBodyPart();
-                htmlPart.setContent(request.bodyHtml(), "text/html; charset=UTF-8");
-                multipart.addBodyPart(htmlPart);
-                message.setContent(multipart);
             } else {
-                message.setText(request.bodyText() != null ? request.bodyText() : "", "UTF-8");
+                bodyPart.setText(request.bodyText() != null ? request.bodyText() : "", "UTF-8");
+            }
+
+            // ── Attach file if provided ────────────────────────────────────────
+            if (attachment != null && !attachment.isEmpty()) {
+                MimeMultipart mixedMultipart = new MimeMultipart("mixed");
+                mixedMultipart.addBodyPart(bodyPart);
+
+                MimeBodyPart attachPart = new MimeBodyPart();
+                String filename = attachment.getOriginalFilename() != null
+                        ? attachment.getOriginalFilename() : "attachment.pdf";
+                attachPart.setFileName(MimeUtility.encodeText(filename, "UTF-8", "B"));
+                attachPart.setContent(attachment.getBytes(),
+                        attachment.getContentType() != null
+                                ? attachment.getContentType()
+                                : "application/pdf");
+                mixedMultipart.addBodyPart(attachPart);
+                message.setContent(mixedMultipart);
+
+                log.info("Attaching '{}' ({} bytes) to email from {}",
+                        filename, attachment.getSize(), account.getEmailAddress());
+            } else {
+                // No attachment — set body directly
+                if (request.bodyHtml() != null && !request.bodyHtml().isBlank()) {
+                    MimeMultipart multipart = new MimeMultipart("alternative");
+                    if (request.bodyText() != null && !request.bodyText().isBlank()) {
+                        MimeBodyPart textPart = new MimeBodyPart();
+                        textPart.setText(request.bodyText(), "UTF-8");
+                        multipart.addBodyPart(textPart);
+                    }
+                    MimeBodyPart htmlPart = new MimeBodyPart();
+                    htmlPart.setContent(request.bodyHtml(), "text/html; charset=UTF-8");
+                    multipart.addBodyPart(htmlPart);
+                    message.setContent(multipart);
+                } else {
+                    message.setText(request.bodyText() != null ? request.bodyText() : "", "UTF-8");
+                }
             }
 
             Transport.send(message);
@@ -112,6 +165,12 @@ public class EmailSendService {
                             0, Math.min(200, request.bodyHtml().replaceAll("<[^>]+>", "").length()))
                         : "");
 
+            boolean hasAttach = attachment != null && !attachment.isEmpty();
+            String attachmentName = hasAttach
+                    ? (attachment.getOriginalFilename() != null
+                            ? attachment.getOriginalFilename() : "attachment.pdf")
+                    : null;
+
             CachedEmail sent = CachedEmail.builder()
                     .accountId(account.getId())
                     .folder(sentFolder)
@@ -126,7 +185,8 @@ public class EmailSendService {
                     .bodyHtml(request.bodyHtml())
                     .bodyLoaded(true)
                     .seen(true)           // sent mail is always "read"
-                    .hasAttachment(false)
+                    .hasAttachment(hasAttach)
+                    .attachmentNames(attachmentName)
                     .receivedAt(LocalDateTime.now(ZoneOffset.UTC))
                     .build();
 

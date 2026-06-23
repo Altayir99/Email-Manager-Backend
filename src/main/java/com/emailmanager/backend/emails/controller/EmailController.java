@@ -9,7 +9,9 @@ import com.emailmanager.backend.cache.repository.FolderStateRepository;
 import com.emailmanager.backend.emails.dto.*;
 import com.emailmanager.backend.emails.service.EmailActionService;
 import com.emailmanager.backend.emails.service.EmailFetchService;
+import com.emailmanager.backend.emails.service.EmailSearchService;
 import com.emailmanager.backend.emails.service.EmailSendService;
+import com.emailmanager.backend.emails.service.ScheduledSendService;
 import com.emailmanager.backend.sync.SyncService;
 import jakarta.validation.Valid;
 import org.springframework.web.multipart.MultipartFile;
@@ -46,7 +48,9 @@ public class EmailController {
     private final EmailAccountService accountService;
     private final EmailFetchService fetchService;      // kept for lazy body fetch + writes
     private final EmailSendService sendService;
+    private final ScheduledSendService scheduledSendService;
     private final EmailActionService actionService;
+    private final EmailSearchService searchService;
     private final SyncService syncService;
 
     // ── Cache repositories (read path) ───────────────────────────────────────
@@ -154,25 +158,31 @@ public class EmailController {
         }
     }
 
-    // ── Search — pure DB, no IMAP ────────────────────────────────────────────
+    // ── Search — cache (default) or IMAP (live) ─────────────────────────────
 
     @GetMapping("/emails/search")
-    public ResponseEntity<EmailPageDto> searchEmails(
+    public ResponseEntity<?> searchEmails(
             @AuthenticationPrincipal UserDetails user,
             @PathVariable UUID accountId,
             @RequestParam String q,
             @RequestParam(defaultValue = "INBOX") String folder,
             @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "25") int pageSize) {
+            @RequestParam(defaultValue = "25") int pageSize,
+            @RequestParam(defaultValue = "cache") String source) {
 
-        accountService.getAccountEntity(user.getUsername(), accountId); // auth check
+        EmailAccount account = accountService.getAccountEntity(user.getUsername(), accountId);
         if (q == null || q.isBlank()) {
             return ResponseEntity.badRequest().build();
         }
 
-        Page<CachedEmail> results = cachedEmailRepo.searchByAccountIdAndFolder(
-                accountId, folder, q.trim(), PageRequest.of(page, pageSize));
+        // IMAP live search — directly queries the mail server
+        if ("imap".equalsIgnoreCase(source)) {
+            List<Map<String, Object>> results = searchService.searchImap(account, folder, q.trim(), pageSize);
+            return ResponseEntity.ok(results);
+        }
 
+        // Default: cache search (fast, Postgres full-text)
+        Page<CachedEmail> results = searchService.searchCache(accountId, folder, q.trim(), pageSize);
         List<EmailSummaryDto> emails = results.stream().map(this::toSummaryDto).toList();
         return ResponseEntity.ok(new EmailPageDto(emails, page, pageSize,
                 (int) results.getTotalElements(), results.hasNext()));
@@ -191,10 +201,10 @@ public class EmailController {
         return ResponseEntity.ok(Map.of("status", "synced", "folder", folder));
     }
 
-    // ── Send ─────────────────────────────────────────────────────────────────
+    // ── Send (with undo-send support) ─────────────────────────────────────────
 
     @PostMapping(value = "/emails/send", consumes = {"multipart/form-data", "application/x-www-form-urlencoded"})
-    public ResponseEntity<Map<String, String>> sendEmail(
+    public ResponseEntity<PendingSendResponse> sendEmail(
             @AuthenticationPrincipal UserDetails user,
             @PathVariable UUID accountId,
             @RequestParam String to,
@@ -207,8 +217,23 @@ public class EmailController {
 
         EmailAccount account = accountService.getAccountEntity(user.getUsername(), accountId);
         SendEmailRequest request = new SendEmailRequest(to, cc, bcc, subject, bodyHtml, bodyText);
-        sendService.sendEmail(account, request, attachment);
-        return ResponseEntity.ok(Map.of("status", "sent"));
+        PendingSendResponse response = scheduledSendService.queueSend(account, request, attachment);
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Cancel a pending send (undo).
+     * Returns 200 with status "cancelled" if successful, or "sent" if already dispatched.
+     */
+    @DeleteMapping("/emails/send/{sendId}")
+    public ResponseEntity<PendingSendResponse> cancelSend(
+            @AuthenticationPrincipal UserDetails user,
+            @PathVariable UUID accountId,
+            @PathVariable UUID sendId) {
+
+        accountService.getAccountEntity(user.getUsername(), accountId); // auth check
+        PendingSendResponse response = scheduledSendService.cancelSend(sendId);
+        return ResponseEntity.ok(response);
     }
 
     // ── Actions — IMAP + write-through cache ─────────────────────────────────

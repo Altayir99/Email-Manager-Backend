@@ -327,22 +327,19 @@ public class SyncService {
         long lastNotified = syncState.getLastNotifiedUid();
         if (currentMaxUid <= lastNotified) return;
 
-        cachedEmailRepository.findByAccountIdAndFolderOrderByReceivedAtDesc(
-                accountId, INBOX, org.springframework.data.domain.PageRequest.of(0, 10))
+        cachedEmailRepository.findNewUnseenEmailsSinceUid(accountId, INBOX, lastNotified, 10)
                 .forEach(email -> {
-                    if (email.getUid() > lastNotified) {
-                        String fcmToken = account.getUser() != null ? account.getUser().getFcmToken() : null;
-                        if (fcmToken != null && !fcmToken.isBlank()) {
-                            pushNotificationService.sendNewEmailNotification(
-                                    fcmToken,
-                                    email.getFromName(),
-                                    email.getSubject(),
-                                    email.getSnippet(),
-                                    accountId.toString(),
-                                    INBOX,
-                                    email.getUid()
-                            );
-                        }
+                    String fcmToken = account.getUser() != null ? account.getUser().getFcmToken() : null;
+                    if (fcmToken != null && !fcmToken.isBlank()) {
+                        pushNotificationService.sendNewEmailNotification(
+                                fcmToken,
+                                email.getFromName(),
+                                email.getSubject(),
+                                email.getSnippet(),
+                                accountId.toString(),
+                                INBOX,
+                                email.getUid()
+                        );
                     }
                 });
 

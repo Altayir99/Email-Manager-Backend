@@ -68,10 +68,9 @@ public class EmailController {
         List<FolderState> states = folderStateRepo.findByAccountIdOrderByFullNameAsc(accountId);
 
         if (states.isEmpty()) {
-            // Cache not yet populated — trigger sync and return empty for now
-            EmailAccount account = accountService.getAccountEntity(user.getUsername(), accountId);
-            syncService.syncAccountNow(accountId);
-            states = folderStateRepo.findByAccountIdOrderByFullNameAsc(accountId);
+            // Cache cold — kick off async background sync; return empty immediately.
+            // Flutter will see folders after the next pull-to-refresh (typically <30s).
+            triggerSyncAsync(accountId);
         }
 
         List<FolderDto> result = states.stream()
@@ -98,11 +97,12 @@ public class EmailController {
                         accountId, folder, PageRequest.of(page, pageSize));
 
         if (cached.isEmpty() && page == 0) {
-            // Cache cold — trigger a sync, then re-query
-            EmailAccount account = accountService.getAccountEntity(user.getUsername(), accountId);
-            syncService.syncAccountNow(accountId);
-            cached = cachedEmailRepo.findByAccountIdAndFolderOrderByReceivedAtDesc(
-                    accountId, folder, PageRequest.of(page, pageSize));
+            // Cache cold — kick off async background sync; return empty immediately.
+            // The scheduled SyncService will populate the cache within ~30s.
+            // Flutter pull-to-refresh will pick up the data.
+            log.info("[EmailController] Cache cold for account={} folder={} — triggering async sync",
+                    accountId, folder);
+            triggerSyncAsync(accountId);
         }
 
         List<EmailSummaryDto> emails = cached.stream()
@@ -190,15 +190,34 @@ public class EmailController {
 
     // ── Force sync (pull-to-refresh or folder open) ─────────────────────────
 
+    /**
+     * Triggers an immediate async sync for the given account.
+     * Returns instantly with {"status": "syncing"} — the Flutter client
+     * should pull-to-refresh after a short delay to pick up the results.
+     */
     @PostMapping("/sync")
     public ResponseEntity<Map<String, String>> triggerSync(
             @AuthenticationPrincipal UserDetails user,
             @PathVariable UUID accountId,
             @RequestParam(defaultValue = "INBOX") String folder) {
 
-        EmailAccount account = accountService.getAccountEntity(user.getUsername(), accountId);
-        syncService.syncAccountNow(accountId, folder);
-        return ResponseEntity.ok(Map.of("status", "synced", "folder", folder));
+        accountService.getAccountEntity(user.getUsername(), accountId); // auth check
+        triggerSyncAsync(accountId);
+        return ResponseEntity.ok(Map.of("status", "syncing", "folder", folder));
+    }
+
+    /**
+     * Fire-and-forget async sync — never blocks the HTTP request thread.
+     * Uses a virtual thread (Java 21 executor) via Spring's @Async.
+     */
+    private void triggerSyncAsync(UUID accountId) {
+        Thread.ofVirtual().name("sync-" + accountId).start(() -> {
+            try {
+                syncService.syncAccountNow(accountId);
+            } catch (Exception e) {
+                log.warn("[EmailController] Async sync failed for account={}: {}", accountId, e.getMessage());
+            }
+        });
     }
 
     // ── Send (with undo-send support) ─────────────────────────────────────────

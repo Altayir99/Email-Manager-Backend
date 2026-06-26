@@ -142,4 +142,3 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
                 org.springframework.data.domain.PageRequest.of(0, limit));
     }
 }
-s 

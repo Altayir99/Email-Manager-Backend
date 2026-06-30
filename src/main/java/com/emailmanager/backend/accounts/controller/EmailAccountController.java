@@ -2,12 +2,7 @@ package com.emailmanager.backend.accounts.controller;
 
 import com.emailmanager.backend.accounts.dto.AccountResponse;
 import com.emailmanager.backend.accounts.dto.AddAccountRequest;
-import com.emailmanager.backend.accounts.entity.EmailAccount;
-import com.emailmanager.backend.accounts.repository.EmailAccountRepository;
 import com.emailmanager.backend.accounts.service.EmailAccountService;
-import com.emailmanager.backend.accounts.service.ImapConnectionService;
-import com.emailmanager.backend.cache.entity.FolderState;
-import com.emailmanager.backend.cache.repository.FolderStateRepository;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -19,17 +14,13 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/accounts")
 @RequiredArgsConstructor
 public class EmailAccountController {
 
-    private final EmailAccountService    accountService;
-    private final EmailAccountRepository accountRepository;
-    private final ImapConnectionService  imapConnectionService;
-    private final FolderStateRepository  folderStateRepository;
+    private final EmailAccountService accountService;
 
     @GetMapping
     public ResponseEntity<List<AccountResponse>> getAccounts(
@@ -59,26 +50,5 @@ public class EmailAccountController {
             @PathVariable UUID id) {
         accountService.testConnection(user.getUsername(), id);
         return ResponseEntity.ok(Map.of("status", "ok", "message", "Connection successful"));
-    }
-
-    /**
-     * Returns folders for an account from the folder_state table.
-     * Returns EmailFolder-compatible JSON: {name, fullName, unreadCount, totalCount, hasChildren}.
-     */
-    @GetMapping("/{id}/folders")
-    public ResponseEntity<List<Map<String, Object>>> listFolders(
-            @AuthenticationPrincipal UserDetails user,
-            @PathVariable UUID id) {
-        List<FolderState> states = folderStateRepository.findByAccountIdOrderByFullNameAsc(id);
-        List<Map<String, Object>> result = states.stream()
-                .map(fs -> Map.<String, Object>of(
-                        "fullName",    fs.getFullName(),
-                        "name",        fs.getDisplayName(),
-                        "unreadCount", fs.getUnreadCount(),
-                        "totalCount",  fs.getTotalCount(),
-                        "hasChildren", false
-                ))
-                .collect(Collectors.toList());
-        return ResponseEntity.ok(result);
     }
 }

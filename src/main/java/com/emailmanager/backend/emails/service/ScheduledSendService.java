@@ -154,6 +154,7 @@ public class ScheduledSendService {
             String contentType,
             byte[] bytes
     ) implements MultipartFile {
+        @Override public String getContentType() { return contentType; }
         @Override public boolean isEmpty() { return bytes == null || bytes.length == 0; }
         @Override public long getSize() { return bytes == null ? 0 : bytes.length; }
         @Override public byte[] getBytes() { return bytes; }

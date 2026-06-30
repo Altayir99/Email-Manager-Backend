@@ -146,21 +146,30 @@ public class ScheduledSendService {
 
     /**
      * A production-safe, in-memory MultipartFile backed by a byte[].
-     * Used to escape the HTTP request scope before the undo-send delay fires.
+     * Implemented as a plain class (not a record) because Java records generate
+     * accessors without the 'get' prefix, which breaks the MultipartFile interface contract.
      */
-    private record BytesBackedMultipartFile(
-            String name,
-            String originalFilename,
-            String contentType,
-            byte[] bytes
-    ) implements MultipartFile {
-        @Override public String getContentType() { return contentType; }
-        @Override public boolean isEmpty() { return bytes == null || bytes.length == 0; }
-        @Override public long getSize() { return bytes == null ? 0 : bytes.length; }
-        @Override public byte[] getBytes() { return bytes; }
-        @Override public InputStream getInputStream() { return new ByteArrayInputStream(bytes); }
-        @Override public Resource getResource() { return MultipartFile.super.getResource(); }
-        @Override public void transferTo(File dest) throws IOException, IllegalStateException {
+    private static final class BytesBackedMultipartFile implements MultipartFile {
+        private final String _name;
+        private final String _originalFilename;
+        private final String _contentType;
+        private final byte[] _bytes;
+
+        BytesBackedMultipartFile(String name, String originalFilename, String contentType, byte[] bytes) {
+            this._name             = name;
+            this._originalFilename = originalFilename;
+            this._contentType      = contentType;
+            this._bytes            = bytes != null ? bytes : new byte[0];
+        }
+
+        @Override public String  getName()             { return _name; }
+        @Override public String  getOriginalFilename() { return _originalFilename; }
+        @Override public String  getContentType()      { return _contentType; }
+        @Override public boolean isEmpty()             { return _bytes.length == 0; }
+        @Override public long    getSize()             { return _bytes.length; }
+        @Override public byte[]  getBytes()            { return _bytes; }
+        @Override public InputStream getInputStream()  { return new ByteArrayInputStream(_bytes); }
+        @Override public void transferTo(File dest) throws IOException {
             throw new UnsupportedOperationException("Not supported for in-memory attachment");
         }
     }

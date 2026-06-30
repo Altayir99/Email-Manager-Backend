@@ -7,6 +7,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.File;
+import org.springframework.core.io.Resource;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.*;
@@ -58,9 +63,34 @@ public class ScheduledSendService {
         UUID sendId = UUID.randomUUID();
         Instant expiresAt = Instant.now().plusSeconds(SEND_DELAY_SECONDS);
 
+        // CRITICAL: MultipartFile is HTTP-request-scoped. We must eagerly copy the
+        // bytes NOW, before the HTTP request ends and the stream is closed.
+        // By the time the 10-second scheduler fires, the original MultipartFile
+        // is already garbage — the bytes would be empty/null.
+        MultipartFile safeAttachment = null;
+        if (attachment != null && !attachment.isEmpty()) {
+            try {
+                byte[] bytes = attachment.getBytes();
+                String originalName = attachment.getOriginalFilename();
+                String contentType = attachment.getContentType();
+                safeAttachment = new BytesBackedMultipartFile(
+                        "attachment",
+                        originalName != null ? originalName : "attachment.pdf",
+                        contentType != null ? contentType : "application/pdf",
+                        bytes
+                );
+                log.debug("[UndoSend] Eagerly copied attachment '{}' ({} bytes) for send {}",
+                        originalName, bytes.length, sendId);
+            } catch (IOException e) {
+                log.error("[UndoSend] Failed to read attachment bytes for send {}: {}", sendId, e.getMessage());
+                // Continue without attachment rather than failing the whole send
+            }
+        }
+
+        final MultipartFile finalAttachment = safeAttachment;
         ScheduledFuture<?> future = scheduler.schedule(() -> {
             try {
-                sendService.sendEmail(account, request, attachment);
+                sendService.sendEmail(account, request, finalAttachment);
                 log.info("[UndoSend] Delivered send {} for {}", sendId, account.getEmailAddress());
             } catch (Exception e) {
                 log.error("[UndoSend] Failed to deliver send {} for {}: {}",
@@ -113,4 +143,24 @@ public class ScheduledSendService {
             EmailAccount account,
             SendEmailRequest request
     ) {}
+
+    /**
+     * A production-safe, in-memory MultipartFile backed by a byte[].
+     * Used to escape the HTTP request scope before the undo-send delay fires.
+     */
+    private record BytesBackedMultipartFile(
+            String name,
+            String originalFilename,
+            String contentType,
+            byte[] bytes
+    ) implements MultipartFile {
+        @Override public boolean isEmpty() { return bytes == null || bytes.length == 0; }
+        @Override public long getSize() { return bytes == null ? 0 : bytes.length; }
+        @Override public byte[] getBytes() { return bytes; }
+        @Override public InputStream getInputStream() { return new ByteArrayInputStream(bytes); }
+        @Override public Resource getResource() { return MultipartFile.super.getResource(); }
+        @Override public void transferTo(File dest) throws IOException, IllegalStateException {
+            throw new UnsupportedOperationException("Not supported for in-memory attachment");
+        }
+    }
 }

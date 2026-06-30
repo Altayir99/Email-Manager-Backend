@@ -84,9 +84,11 @@ public class SyncService {
         List<EmailAccount> accounts = accountRepository.findAllWithUser();
         for (EmailAccount account : accounts) {
             if (!account.isActive()) continue;
-            List<String> folders = account.getImapHost().contains("gmail")
-                    ? GMAIL_FOLDERS
-                    : folderCache.computeIfAbsent(account.getId(), id -> discoverImapFolders(account));
+            // Use RFC 6154 discovery for ALL accounts — locale-independent.
+            // This correctly handles German Google Workspace accounts where
+            // [Gmail]/Sent Mail is actually [Gmail]/Gesendet, etc.
+            List<String> folders = folderCache.computeIfAbsent(
+                    account.getId(), id -> discoverImapFolders(account));
             for (String folder : folders) {
                 try {
                     syncAccountFolder(account, folder);

@@ -6,8 +6,8 @@ import com.emailmanager.backend.accounts.entity.EmailAccount;
 import com.emailmanager.backend.accounts.repository.EmailAccountRepository;
 import com.emailmanager.backend.accounts.service.EmailAccountService;
 import com.emailmanager.backend.accounts.service.ImapConnectionService;
-import jakarta.mail.Folder;
-import jakarta.mail.Store;
+import com.emailmanager.backend.cache.entity.FolderState;
+import com.emailmanager.backend.cache.repository.FolderStateRepository;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -16,7 +16,6 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -30,6 +29,7 @@ public class EmailAccountController {
     private final EmailAccountService    accountService;
     private final EmailAccountRepository accountRepository;
     private final ImapConnectionService  imapConnectionService;
+    private final FolderStateRepository  folderStateRepository;
 
     @GetMapping
     public ResponseEntity<List<AccountResponse>> getAccounts(
@@ -62,27 +62,23 @@ public class EmailAccountController {
     }
 
     /**
-     * Lists all IMAP folders available on the server for a given account.
-     * Useful for diagnosing the correct folder names (e.g. "Sent" vs "Sent Items").
+     * Returns folders for an account from the folder_state table.
+     * Returns EmailFolder-compatible JSON: {name, fullName, unreadCount, totalCount, hasChildren}.
      */
     @GetMapping("/{id}/folders")
-    public ResponseEntity<List<String>> listFolders(
+    public ResponseEntity<List<Map<String, Object>>> listFolders(
             @AuthenticationPrincipal UserDetails user,
             @PathVariable UUID id) {
-        EmailAccount account = accountRepository.findById(id).orElseThrow();
-        Store store = imapConnectionService.acquireStore(account);
-        try {
-            Folder[] folders = store.getDefaultFolder().list("*");
-            List<String> names = Arrays.stream(folders)
-                    .map(Folder::getFullName)
-                    .sorted()
-                    .collect(Collectors.toList());
-            return ResponseEntity.ok(names);
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(List.of("Error: " + e.getMessage()));
-        } finally {
-            imapConnectionService.releaseStore(id);
-        }
+        List<FolderState> states = folderStateRepository.findByAccountIdOrderByFullNameAsc(id);
+        List<Map<String, Object>> result = states.stream()
+                .map(fs -> Map.<String, Object>of(
+                        "fullName",    fs.getFullName(),
+                        "name",        fs.getDisplayName(),
+                        "unreadCount", fs.getUnreadCount(),
+                        "totalCount",  fs.getTotalCount(),
+                        "hasChildren", false
+                ))
+                .collect(Collectors.toList());
+        return ResponseEntity.ok(result);
     }
 }

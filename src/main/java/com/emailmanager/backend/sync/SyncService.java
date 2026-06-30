@@ -214,7 +214,7 @@ public class SyncService {
         try {
             IMAPFolder imapFolder = (IMAPFolder) store.getFolder(folderName);
             if (!imapFolder.exists()) {
-                log.debug("[Sync] Folder '{}' does not exist on {}", folderName, account.getEmailAddress());
+                log.warn("[Sync] Folder '{}' does not exist on {} — skipping", folderName, account.getEmailAddress());
                 return;
             }
             imapFolder.open(Folder.READ_ONLY);

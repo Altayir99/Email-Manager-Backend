@@ -267,10 +267,23 @@ public class EmailController {
             @RequestParam(defaultValue = "true") boolean read) {
 
         EmailAccount account = accountService.getAccountEntity(user.getUsername(), accountId);
+
+        // Capture previous seen state so we only adjust the count when it actually changes
+        boolean wasSeen = cachedEmailRepo.findByAccountIdAndFolderAndUid(accountId, folder, uid)
+                .map(CachedEmail::isSeen).orElse(read);
+
         if (read) actionService.markAsRead(account, folder, uid);
         else actionService.markAsUnread(account, folder, uid);
-        // Write-through: reflect in cache immediately
         cachedEmailRepo.updateSeen(accountId, folder, uid, read);
+
+        // Keep folder_state.unread_count in sync
+        if (wasSeen != read) {
+            folderStateRepo.findByAccountIdAndFullName(accountId, folder).ifPresent(fs -> {
+                int delta = read ? -1 : 1;
+                fs.setUnreadCount(Math.max(0, fs.getUnreadCount() + delta));
+                folderStateRepo.save(fs);
+            });
+        }
         return ResponseEntity.noContent().build();
     }
 

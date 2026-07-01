@@ -110,12 +110,12 @@ public class EmailSendService {
 
                 MimeBodyPart attachPart = new MimeBodyPart();
                 String filename = attachment.getOriginalFilename() != null
-                        ? attachment.getOriginalFilename() : "attachment.pdf";
+                        ? attachment.getOriginalFilename() : "attachment";
                 attachPart.setFileName(MimeUtility.encodeText(filename, "UTF-8", "B"));
                 attachPart.setContent(attachment.getBytes(),
                         attachment.getContentType() != null
                                 ? attachment.getContentType()
-                                : "application/pdf");
+                                : "application/octet-stream");
                 mixedMultipart.addBodyPart(attachPart);
                 message.setContent(mixedMultipart);
 

@@ -63,7 +63,10 @@ logging:
 
 ai:
   gemini:
-    api-key: ""  # Set GEMINI_API_KEY env var to enable AI features
+    api-key: ""  # Set GEMINI_API_KEY env var to enable Gemini AI
+  claude:
+    api-key: ""  # Set ANTHROPIC_API_KEY env var to enable Claude AI (preferred over Gemini)
+    model: claude-opus-4-5
 
 ---
 spring:
@@ -113,3 +116,6 @@ server:
 ai:
   gemini:
     api-key: ${GEMINI_API_KEY:}
+  claude:
+    api-key: ${ANTHROPIC_API_KEY:}
+    model: ${CLAUDE_MODEL:claude-opus-4-5}

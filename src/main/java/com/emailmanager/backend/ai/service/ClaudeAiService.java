@@ -71,18 +71,19 @@ public class ClaudeAiService {
         if (!isEnabled()) return "Claude not configured";
         try {
             String prompt = """
-                    You are a professional email assistant. Draft a concise reply to this email.
+                    Du bist ein professioneller E-Mail-Assistent. Verfasse eine prägnante Antwort auf diese E-Mail.
+                    Antworte IMMER auf Deutsch, unabhängig von der Sprache der Original-E-Mail.
                     
-                    Tone: %s
+                    Ton: %s
                     
-                    Original email:
-                    From: %s
-                    Subject: %s
-                    Body:
+                    Original-E-Mail:
+                    Von: %s
+                    Betreff: %s
+                    Inhalt:
                     %s
                     
-                    Write ONLY the reply body text (no greeting header, no signature).
-                    Keep it professional, concise, and under 150 words.
+                    Schreibe NUR den Antworttext (keine Anrede, keine Signatur).
+                    Professionell, prägnant und unter 150 Wörtern.
                     """.formatted(tone, from, subject, truncateBody(body));
             return callClaude(prompt);
         } catch (Exception e) {
@@ -121,22 +122,23 @@ public class ClaudeAiService {
 
     private String buildAnalysisPrompt(String subject, String from, String body) {
         return """
-                Analyze this email and respond in STRICT JSON format with NO markdown:
+                Analysiere diese E-Mail und antworte im STRIKTEN JSON-Format OHNE Markdown.
+                Antworte IMMER auf Deutsch, unabhängig von der Sprache der E-Mail.
                 
                 {
-                  "summary": "2-3 sentence summary of the email",
+                  "summary": "2-3 Sätze Zusammenfassung der E-Mail auf Deutsch",
                   "sentiment": "positive | negative | neutral | urgent",
-                  "actionItems": ["action 1", "action 2"],
-                  "suggestedReply": "A brief 1-2 sentence suggested reply"
+                  "actionItems": ["Aufgabe 1", "Aufgabe 2"],
+                  "suggestedReply": "Kurze 1-2 Satz Antwortvorlage auf Deutsch"
                 }
                 
-                Email:
-                From: %s
-                Subject: %s
-                Body:
+                E-Mail:
+                Von: %s
+                Betreff: %s
+                Inhalt:
                 %s
                 
-                Respond ONLY with valid JSON. No explanation, no markdown code blocks.
+                Antworte NUR mit gültigem JSON. Keine Erklärung, kein Markdown.
                 """.formatted(from, subject, truncateBody(body));
     }
 

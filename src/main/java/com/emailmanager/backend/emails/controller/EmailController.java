@@ -345,7 +345,8 @@ public class EmailController {
                 e.getReceivedAt(),
                 e.isSeen(),
                 e.isHasAttachment(),
-                e.getFolder()
+                e.getFolder(),
+                e.getToAddresses()   // may be null for old cached rows
         );
     }
 

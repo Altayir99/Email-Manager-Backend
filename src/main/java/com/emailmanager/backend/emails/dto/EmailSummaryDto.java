@@ -11,5 +11,6 @@ public record EmailSummaryDto(
         LocalDateTime receivedAt,
         boolean read,
         boolean hasAttachment,
-        String folder
+        String folder,
+        String toAddresses   // semicolon-delimited "Name <addr>" list; null for non-sent
 ) {}

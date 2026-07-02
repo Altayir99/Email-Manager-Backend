@@ -182,7 +182,9 @@ public class EmailFetchService {
 
         return new EmailSummaryDto(
                 uid, subject, fromAddress, fromName,
-                snippet, receivedAt, read, hasAttachment, folderName);
+                snippet, receivedAt, read, hasAttachment, folderName,
+                null  // toAddresses not available on live-fetch path; populated via cache sync
+        );
     }
 
     private EmailDetailDto toDetail(Message msg, String folderName, long uid)

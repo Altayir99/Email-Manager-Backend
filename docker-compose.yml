@@ -31,6 +31,8 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       APP_USERNAME: ${APP_USERNAME}
       APP_PASSWORD: ${APP_PASSWORD}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     depends_on:
       postgres-email:
         condition: service_healthy

@@ -312,11 +312,33 @@ public class EmailFetchService {
     private String[] extractBody(Part part) throws MessagingException, IOException {
         String text = "", html = "";
         String contentType = part.getContentType().toLowerCase();
-        Object content = part.getContent();
+
+        Object content;
+        try {
+            content = part.getContent();
+        } catch (Exception e) {
+            // Some encoded parts (e.g. unknown charset) fail getContent() —
+            // fall back to raw stream with UTF-8
+            log.debug("getContent() failed for part, falling back to stream: {}", e.getMessage());
+            try (InputStream is = part.getInputStream()) {
+                String raw = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+                if (contentType.contains("html")) html = raw;
+                else text = raw;
+            } catch (Exception ignored) {}
+            return new String[]{text, html};
+        }
 
         if (content instanceof String s) {
             if (contentType.contains("html")) html = s;
             else text = s;
+        } else if (content instanceof InputStream is) {
+            // InputStream content: common in base64/quoted-printable reply parts
+            // Extract charset from Content-Type (e.g. text/plain; charset=utf-8)
+            String charset = extractCharset(part.getContentType());
+            String raw = new String(is.readAllBytes(),
+                    java.nio.charset.Charset.forName(charset));
+            if (contentType.contains("html")) html = raw;
+            else text = raw;
         } else if (content instanceof MimeMultipart mp) {
             // multipart/alternative → prefer html over plain (pick best variant)
             if (contentType.contains("alternative")) {
@@ -339,6 +361,22 @@ public class EmailFetchService {
             }
         }
         return new String[]{text, html};
+    }
+
+    /** Extracts charset from a Content-Type header, defaults to UTF-8. */
+    private String extractCharset(String contentType) {
+        if (contentType == null) return "UTF-8";
+        for (String part : contentType.split(";")) {
+            String trimmed = part.trim().toLowerCase();
+            if (trimmed.startsWith("charset=")) {
+                String cs = trimmed.substring(8).replace("\"", "").trim();
+                try {
+                    java.nio.charset.Charset.forName(cs);
+                    return cs;
+                } catch (Exception ignored) {}
+            }
+        }
+        return "UTF-8";
     }
 
     private void collectAttachments(Part part, List<String> names)

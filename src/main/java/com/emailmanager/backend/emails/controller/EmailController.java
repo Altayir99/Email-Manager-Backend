@@ -14,6 +14,7 @@ import com.emailmanager.backend.emails.service.EmailSendService;
 import com.emailmanager.backend.emails.service.ScheduledSendService;
 import com.emailmanager.backend.sync.SyncService;
 import jakarta.validation.Valid;
+import jakarta.mail.MessagingException;
 import org.springframework.web.multipart.MultipartFile;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -131,8 +132,15 @@ public class EmailController {
                 .findByAccountIdAndFolderAndUid(accountId, folder, uid)
                 .orElse(null);
 
-        if (cached != null && cached.isBodyLoaded()) {
-            // Full cache hit — no IMAP needed
+        // Cache hit is only valid if the body was actually loaded AND is non-empty.
+        // A previous failed load may have set body_loaded=true with empty strings —
+        // treat that as a miss so we re-fetch from IMAP.
+        boolean hasBody = cached != null
+                && cached.isBodyLoaded()
+                && (cached.getBodyHtml() != null && !cached.getBodyHtml().isBlank()
+                    || cached.getBodyText() != null && !cached.getBodyText().isBlank());
+
+        if (hasBody) {
             cachedEmailRepo.updateSeen(accountId, folder, uid, true);
             return ResponseEntity.ok(toDetailDto(cached));
         }
@@ -153,7 +161,8 @@ public class EmailController {
                 cachedEmailRepo.save(cached);
             }
             return ResponseEntity.ok(detail);
-        } catch (IOException e) {
+        } catch (IOException | MessagingException e) {
+            log.warn("[EmailController] Failed to fetch body for uid={} folder={}: {}", uid, folder, e.getMessage());
             return ResponseEntity.internalServerError().build();
         }
     }

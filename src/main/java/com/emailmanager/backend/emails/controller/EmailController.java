@@ -13,6 +13,7 @@ import com.emailmanager.backend.emails.service.EmailSearchService;
 import com.emailmanager.backend.emails.service.EmailSendService;
 import com.emailmanager.backend.emails.service.ScheduledSendService;
 import com.emailmanager.backend.sync.SyncService;
+import com.emailmanager.backend.config.exception.AccountConnectionException;
 import jakarta.validation.Valid;
 import jakarta.mail.MessagingException;
 import org.springframework.web.multipart.MultipartFile;
@@ -132,40 +133,55 @@ public class EmailController {
                 .findByAccountIdAndFolderAndUid(accountId, folder, uid)
                 .orElse(null);
 
-        // Cache hit is only valid if the body was actually loaded AND is non-empty.
-        // A previous failed load may have set body_loaded=true with empty strings —
-        // treat that as a miss so we re-fetch from IMAP.
+        log.info("[Detail] uid={} folder={} cached={} bodyLoaded={} htmlLen={} textLen={}",
+                uid, folder,
+                cached != null,
+                cached != null && cached.isBodyLoaded(),
+                cached != null && cached.getBodyHtml() != null ? cached.getBodyHtml().length() : 0,
+                cached != null && cached.getBodyText() != null ? cached.getBodyText().length() : 0);
+
+        // Cache hit: body must be non-empty (a previous failed load may have written empty strings)
         boolean hasBody = cached != null
                 && cached.isBodyLoaded()
                 && (cached.getBodyHtml() != null && !cached.getBodyHtml().isBlank()
                     || cached.getBodyText() != null && !cached.getBodyText().isBlank());
 
         if (hasBody) {
+            log.info("[Detail] Cache HIT uid={} htmlLen={} textLen={}", uid,
+                    cached.getBodyHtml() != null ? cached.getBodyHtml().length() : 0,
+                    cached.getBodyText() != null ? cached.getBodyText().length() : 0);
             cachedEmailRepo.updateSeen(accountId, folder, uid, true);
             return ResponseEntity.ok(toDetailDto(cached));
         }
 
-        // Lazy body fetch via IMAP (only for bodies, not metadata)
+        // Lazy body fetch via IMAP
+        log.info("[Detail] Cache MISS uid={} — fetching from IMAP folder={}", uid, folder);
         try {
             EmailDetailDto detail = fetchService.fetchEmailDetail(account, folder, uid);
-            // Write body back to cache
+            log.info("[Detail] IMAP OK uid={} htmlLen={} textLen={}", uid,
+                    detail.bodyHtml() != null ? detail.bodyHtml().length() : 0,
+                    detail.bodyText() != null ? detail.bodyText().length() : 0);
             if (cached != null) {
                 cached.setBodyText(detail.bodyText());
                 cached.setBodyHtml(detail.bodyHtml());
                 cached.setBodyLoaded(true);
                 cached.setSeen(true);
-                // Persist attachment names so cache-hit path returns them
                 if (detail.attachmentNames() != null && !detail.attachmentNames().isEmpty()) {
                     cached.setAttachmentNames(String.join(";", detail.attachmentNames()));
                 }
                 cachedEmailRepo.save(cached);
             }
             return ResponseEntity.ok(detail);
+        } catch (AccountConnectionException e) {
+            // IMAP lock held by IDLE service — client should retry
+            log.warn("[Detail] IMAP BUSY uid={} folder={}: {}", uid, folder, e.getMessage());
+            return ResponseEntity.status(503).build();
         } catch (IOException | MessagingException e) {
-            log.warn("[EmailController] Failed to fetch body for uid={} folder={}: {}", uid, folder, e.getMessage());
+            log.warn("[Detail] IMAP FAILED uid={} folder={}: {}", uid, folder, e.getMessage());
             return ResponseEntity.internalServerError().build();
         }
     }
+
 
     // ── Search — cache (default) or IMAP (live) ─────────────────────────────
 

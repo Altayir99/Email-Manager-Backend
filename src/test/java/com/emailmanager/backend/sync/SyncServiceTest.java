@@ -46,6 +46,7 @@ class SyncServiceTest {
 
     @Mock EmailAccountRepository accountRepository;
     @Mock ImapConnectionService  imapConnectionService;
+    @Mock com.emailmanager.backend.accounts.service.ImapFolderResolver folderResolver;
     @Mock CachedEmailRepository  cachedEmailRepo;
     @Mock FolderStateRepository  folderStateRepo;
     @Mock AccountSyncStateRepository syncStateRepo;
@@ -101,6 +102,9 @@ class SyncServiceTest {
 
         // Lenient catch-all for getMessagesByUID — returns empty for any unstubbed range
         lenient().when(folder.getMessagesByUID(anyLong(), anyLong())).thenReturn(new Message[0]);
+
+        // Folder discovery is now delegated to ImapFolderResolver — default to INBOX only.
+        lenient().when(folderResolver.syncFolders(any())).thenReturn(List.of("INBOX"));
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

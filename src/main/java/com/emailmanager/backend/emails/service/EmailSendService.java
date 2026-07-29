@@ -2,6 +2,8 @@ package com.emailmanager.backend.emails.service;
 
 import com.emailmanager.backend.accounts.entity.EmailAccount;
 import com.emailmanager.backend.accounts.service.EncryptionService;
+import com.emailmanager.backend.accounts.service.ImapFolderResolver;
+import com.emailmanager.backend.accounts.service.ImapFolderResolver.SpecialUse;
 import com.emailmanager.backend.cache.entity.CachedEmail;
 import com.emailmanager.backend.cache.repository.CachedEmailRepository;
 import com.emailmanager.backend.config.exception.AccountConnectionException;
@@ -25,8 +27,10 @@ public class EmailSendService {
 
     private final EncryptionService      encryptionService;
     private final CachedEmailRepository  cachedEmailRepository;
+    private final ImapFolderResolver     folderResolver;
 
-    // Gmail stores sent mail here; generic IMAP uses "Sent"
+    // Fallback names used only if special-use resolution fails.
+    // Gmail stores sent mail here; generic IMAP uses "Sent".
     private static final String GMAIL_SENT_FOLDER   = "[Gmail]/Sent Mail";
     private static final String GENERIC_SENT_FOLDER = "Sent";
 
@@ -151,8 +155,14 @@ public class EmailSendService {
         // Send succeeded — write to local cache so Sent folder is instant.
         // Failure here must NOT bubble up (send already succeeded).
         try {
-            String sentFolder = account.getSmtpHost().contains("gmail")
+            // Resolve the real Sent folder (locale-independent) — e.g. a German
+            // Gmail uses [Gmail]/Gesendet, not [Gmail]/Sent Mail. Fall back to the
+            // host-based default only if resolution fails (non-fatal: the next
+            // incremental sync overwrites this cache row with the real UID/folder).
+            String defaultSent = account.getSmtpHost().contains("gmail")
                     ? GMAIL_SENT_FOLDER : GENERIC_SENT_FOLDER;
+            String sentFolder = folderResolver.resolve(account, SpecialUse.SENT)
+                    .orElse(defaultSent);
 
             // Use a synthetic negative UID so it doesn't clash with IMAP UIDs.
             // The next incremental sync will overwrite with the real UID.

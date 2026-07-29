@@ -3,6 +3,7 @@ package com.emailmanager.backend.sync;
 import com.emailmanager.backend.accounts.entity.EmailAccount;
 import com.emailmanager.backend.accounts.repository.EmailAccountRepository;
 import com.emailmanager.backend.accounts.service.ImapConnectionService;
+import com.emailmanager.backend.accounts.service.ImapFolderResolver;
 import com.emailmanager.backend.cache.entity.AccountSyncState;
 import com.emailmanager.backend.cache.entity.CachedEmail;
 import com.emailmanager.backend.cache.entity.FolderState;
@@ -22,7 +23,6 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -47,25 +47,9 @@ public class SyncService {
     private static final int FLAG_RECONCILE_WINDOW = 200;
     private static final int FLAG_RECONCILE_INTERVAL_MINUTES = 5;
 
-    /** Folders synced in background for Gmail accounts. */
-    private static final List<String> GMAIL_FOLDERS = List.of(
-            "INBOX", "[Gmail]/Sent Mail", "[Gmail]/Drafts", "[Gmail]/Spam", "[Gmail]/Trash"
-    );
-
-    /**
-     * Fallback IMAP folder names tried when RFC 6154 special-use attributes
-     * are not advertised by the server. Checked in order; first existing one wins.
-     */
-    private static final List<String> SENT_CANDIDATES   = List.of("Sent", "Sent Items", "Sent Messages", "INBOX.Sent");
-    private static final List<String> DRAFTS_CANDIDATES = List.of("Drafts", "Draft", "INBOX.Drafts");
-    private static final List<String> JUNK_CANDIDATES   = List.of("Junk", "Spam", "Junk Email", "INBOX.Junk");
-    private static final List<String> TRASH_CANDIDATES  = List.of("Trash", "Deleted Items", "Deleted Messages", "INBOX.Trash");
-
-    /** Per-account discovered folder list cache (reset on restart, re-discovered on first sync). */
-    private final ConcurrentHashMap<UUID, List<String>> folderCache = new ConcurrentHashMap<>();
-
     private final EmailAccountRepository      accountRepository;
     private final ImapConnectionService       imapConnectionService;
+    private final ImapFolderResolver          folderResolver;
     private final CachedEmailRepository       cachedEmailRepository;
     private final FolderStateRepository       folderStateRepository;
     private final AccountSyncStateRepository  syncStateRepository;
@@ -87,11 +71,10 @@ public class SyncService {
             // discovery (e.g. IMAP connection refused) does NOT abort the sync
             // run for every remaining account.
             try {
-                // Use RFC 6154 discovery for ALL accounts — locale-independent.
-                // This correctly handles German Google Workspace accounts where
-                // [Gmail]/Sent Mail is actually [Gmail]/Gesendet, etc.
-                List<String> folders = folderCache.computeIfAbsent(
-                        account.getId(), id -> discoverImapFolders(account));
+                // Locale-independent folder discovery (RFC 6154 + fallbacks) via the
+                // shared resolver — correctly handles German Google Workspace accounts
+                // where [Gmail]/Sent Mail is actually [Gmail]/Gesendet, etc.
+                List<String> folders = folderResolver.syncFolders(account);
                 for (String folder : folders) {
                     try {
                         syncAccountFolder(account, folder);
@@ -103,67 +86,6 @@ public class SyncService {
                 log.warn("[Sync] account cycle failed for {}: {}", account.getEmailAddress(), e.getMessage());
             }
         }
-    }
-
-    /**
-     * Auto-discovers the real Sent/Drafts/Junk/Trash folder names for a standard IMAP account.
-     * Uses RFC 6154 special-use attributes (\Sent, \Drafts, \Junk, \Trash) first.
-     * Falls back to trying common name variants if attributes aren't advertised.
-     * Result is cached per account for the lifetime of the process.
-     */
-    private List<String> discoverImapFolders(EmailAccount account) {
-        log.info("[Sync] Discovering IMAP folders for {}", account.getEmailAddress());
-        Store store = imapConnectionService.acquireStore(account);
-        try {
-            Folder[] allFolders = store.getDefaultFolder().list("*");
-
-            // Phase 1: try RFC 6154 special-use attributes
-            String sentFolder = null, draftsFolder = null, junkFolder = null, trashFolder = null;
-            for (Folder f : allFolders) {
-                if (f instanceof IMAPFolder imapF) {
-                    String[] attrs = imapF.getAttributes();
-                    if (attrs == null) continue;
-                    for (String attr : attrs) {
-                        switch (attr.toLowerCase()) {
-                            case "\\sent"   -> sentFolder   = f.getFullName();
-                            case "\\drafts" -> draftsFolder = f.getFullName();
-                            case "\\junk"   -> junkFolder   = f.getFullName();
-                            case "\\trash"  -> trashFolder  = f.getFullName();
-                            default -> {}
-                        }
-                    }
-                }
-            }
-
-            Set<String> existingNames = new HashSet<>();
-            for (Folder f : allFolders) existingNames.add(f.getFullName());
-
-            // Phase 2: fall back to well-known names if attribute not found
-            if (sentFolder   == null) sentFolder   = firstExisting(existingNames, SENT_CANDIDATES);
-            if (draftsFolder == null) draftsFolder = firstExisting(existingNames, DRAFTS_CANDIDATES);
-            if (junkFolder   == null) junkFolder   = firstExisting(existingNames, JUNK_CANDIDATES);
-            if (trashFolder  == null) trashFolder  = firstExisting(existingNames, TRASH_CANDIDATES);
-
-            List<String> discovered = new ArrayList<>();
-            discovered.add(INBOX);
-            if (sentFolder   != null) discovered.add(sentFolder);
-            if (draftsFolder != null) discovered.add(draftsFolder);
-            if (junkFolder   != null) discovered.add(junkFolder);
-            if (trashFolder  != null) discovered.add(trashFolder);
-
-            log.info("[Sync] Discovered folders for {}: {}", account.getEmailAddress(), discovered);
-            return discovered;
-        } catch (Exception e) {
-            log.warn("[Sync] Folder discovery failed for {}: {} — using defaults",
-                    account.getEmailAddress(), e.getMessage());
-            return List.of(INBOX, "Sent", "Drafts", "Junk", "Trash");
-        } finally {
-            imapConnectionService.releaseStore(account.getId());
-        }
-    }
-
-    private String firstExisting(Set<String> existing, List<String> candidates) {
-        return candidates.stream().filter(existing::contains).findFirst().orElse(null);
     }
 
     /**

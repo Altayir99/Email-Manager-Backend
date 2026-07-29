@@ -55,13 +55,15 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
                        @Param("uids") List<Long> uids);
 
     /** Optimistic write-through: remove single row on delete/move. */
-    @Modifying
+    @Modifying(clearAutomatically = true)
+    @org.springframework.transaction.annotation.Transactional
     @Query("DELETE FROM CachedEmail e WHERE e.accountId = :accountId AND e.folder = :folder AND e.uid = :uid")
     int deleteByAccountIdAndFolderAndUid(
             @Param("accountId") UUID accountId, @Param("folder") String folder, @Param("uid") long uid);
 
     /** Bulk evict UIDs that no longer exist on the server (deletion detection). */
-    @Modifying
+    @Modifying(clearAutomatically = true)
+    @org.springframework.transaction.annotation.Transactional
     @Query("DELETE FROM CachedEmail e WHERE e.accountId = :accountId AND e.folder = :folder AND e.uid IN :uids")
     int deleteByAccountIdAndFolderAndUidIn(
             @Param("accountId") UUID accountId,
@@ -69,7 +71,8 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
             @Param("uids") List<Long> uids);
 
     /** Wipe all cached emails for a folder when UIDVALIDITY changes. */
-    @Modifying
+    @Modifying(clearAutomatically = true)
+    @org.springframework.transaction.annotation.Transactional
     @Query("DELETE FROM CachedEmail e WHERE e.accountId = :accountId AND e.folder = :folder")
     void deleteByAccountIdAndFolder(
             @Param("accountId") UUID accountId, @Param("folder") String folder);

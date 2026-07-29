@@ -4,6 +4,7 @@ import com.emailmanager.backend.accounts.entity.EmailAccount;
 import com.emailmanager.backend.accounts.service.ImapConnectionService;
 import com.emailmanager.backend.cache.entity.CachedEmail;
 import com.emailmanager.backend.cache.repository.CachedEmailRepository;
+import com.emailmanager.backend.sync.SnippetExtractor;
 import com.sun.mail.imap.IMAPFolder;
 import jakarta.mail.*;
 import jakarta.mail.internet.InternetAddress;
@@ -29,7 +30,6 @@ import java.util.*;
 public class EmailSearchService {
 
     private static final int DEFAULT_PAGE_SIZE = 30;
-    private static final int SNIPPET_MAX = 200;
 
     private final CachedEmailRepository cachedEmailRepo;
     private final ImapConnectionService imapConnectionService;
@@ -147,33 +147,13 @@ public class EmailSearchService {
         boolean seen = msg.isSet(Flags.Flag.SEEN);
         map.put("seen", seen);
 
-        // Snippet from content (best-effort)
-        map.put("snippet", extractSnippet(msg));
+        // Snippet from content — shared logic strips CSS/JS and handles
+        // multipart/mixed (previously leaked CSS / returned empty snippets).
+        map.put("snippet", SnippetExtractor.fromMessage(msg));
 
         map.put("hasAttachments", hasAttachments(msg));
 
         return map;
-    }
-
-    private String extractSnippet(Message msg) {
-        try {
-            Object content = msg.getContent();
-            if (content instanceof String text) {
-                return text.length() > SNIPPET_MAX ? text.substring(0, SNIPPET_MAX) : text;
-            }
-            if (content instanceof Multipart multipart) {
-                for (int i = 0; i < multipart.getCount(); i++) {
-                    BodyPart part = multipart.getBodyPart(i);
-                    if (part.isMimeType("text/plain")) {
-                        String text = (String) part.getContent();
-                        return text.length() > SNIPPET_MAX ? text.substring(0, SNIPPET_MAX) : text;
-                    }
-                }
-            }
-        } catch (Exception ignored) {
-            // Content fetch may fail for some messages — return empty snippet
-        }
-        return "";
     }
 
     private boolean hasAttachments(Message msg) {

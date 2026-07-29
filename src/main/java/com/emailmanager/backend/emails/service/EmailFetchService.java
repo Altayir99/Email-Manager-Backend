@@ -39,8 +39,6 @@ public class EmailFetchService {
 
     private final ImapConnectionService imapConnectionService;
 
-    private static final int SNIPPET_MAX = 200;
-
     // ── Folders ──────────────────────────────────────────────────────────────
 
     public List<FolderDto> listFolders(EmailAccount account) throws MessagingException {
@@ -240,73 +238,6 @@ public class EmailFetchService {
             return ct.toLowerCase().contains("mixed");
         } catch (Exception ignored) {}
         return false;
-    }
-
-    /**
-     * Phase 2.3: determines hasAttachment by inspecting body-part disposition,
-     * rather than just checking if content-type contains "multipart".
-     */
-    private boolean hasAttachmentParts(Message msg) {
-        try {
-            String ct = msg.getContentType();
-            if (ct == null || !ct.toLowerCase().contains("multipart")) return false;
-            Object content = msg.getContent();
-            if (content instanceof MimeMultipart mp) {
-                for (int i = 0; i < mp.getCount(); i++) {
-                    String disp = mp.getBodyPart(i).getDisposition();
-                    if (Part.ATTACHMENT.equalsIgnoreCase(disp)) return true;
-                }
-            }
-        } catch (Exception ignored) {}
-        return false;
-    }
-
-    /**
-     * Phase 2.3: extracts the first SNIPPET_MAX characters of the plain-text
-     * body as a preview snippet. Falls back to HTML stripped of tags.
-     * Never downloads the full body for this — reads only what's needed.
-     */
-    private String extractSnippet(Message msg) {
-        try {
-            Object content = msg.getContent();
-            if (content instanceof String s) {
-                String ct = msg.getContentType().toLowerCase();
-                String text = ct.contains("html") ? stripTags(s) : s;
-                return truncate(text.trim());
-            }
-            if (content instanceof MimeMultipart mp) {
-                // prefer plain text
-                for (int i = 0; i < mp.getCount(); i++) {
-                    BodyPart part = mp.getBodyPart(i);
-                    if (part.getContentType().toLowerCase().contains("text/plain")) {
-                        return truncate(part.getContent().toString().trim());
-                    }
-                }
-                // fallback: first body part
-                for (int i = 0; i < mp.getCount(); i++) {
-                    BodyPart part = mp.getBodyPart(i);
-                    String disp = part.getDisposition();
-                    if (!Part.ATTACHMENT.equalsIgnoreCase(disp)) {
-                        String raw = part.getContent().toString();
-                        String ct  = part.getContentType().toLowerCase();
-                        return truncate(ct.contains("html") ? stripTags(raw) : raw.trim());
-                    }
-                }
-            }
-        } catch (Exception ignored) {}
-        return "";
-    }
-
-    private String truncate(String text) {
-        if (text == null) return "";
-        text = text.replaceAll("\\s+", " ").trim();
-        return text.length() > SNIPPET_MAX ? text.substring(0, SNIPPET_MAX) + "…" : text;
-    }
-
-    private String stripTags(String html) {
-        return html.replaceAll("<[^>]+>", " ").replaceAll("&nbsp;", " ")
-                   .replaceAll("&amp;", "&").replaceAll("&lt;", "<")
-                   .replaceAll("&gt;", ">").replaceAll("\\s+", " ").trim();
     }
 
     private String[] extractBody(Part part) throws MessagingException, IOException {

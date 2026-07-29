@@ -12,6 +12,7 @@ import com.emailmanager.backend.emails.service.EmailFetchService;
 import com.emailmanager.backend.emails.service.EmailSearchService;
 import com.emailmanager.backend.emails.service.EmailSendService;
 import com.emailmanager.backend.emails.service.ScheduledSendService;
+import com.emailmanager.backend.sync.SnippetExtractor;
 import com.emailmanager.backend.sync.SyncService;
 import com.emailmanager.backend.config.exception.AccountConnectionException;
 import jakarta.validation.Valid;
@@ -166,6 +167,16 @@ public class EmailController {
                 cached.setBodyHtml(detail.bodyHtml());
                 cached.setBodyLoaded(true);
                 cached.setSeen(true);
+                // Self-healing snippet backfill: recompute the preview from the
+                // freshly-loaded body using the current stripping logic, so old
+                // cache rows (which may hold a broken CSS-leaking snippet) get a
+                // clean preview on open. Cache-first: no extra IMAP roundtrip.
+                // Only overwrite when we actually derived text — never blank a
+                // possibly-good existing snippet.
+                String freshSnippet = SnippetExtractor.fromBody(detail.bodyText(), detail.bodyHtml());
+                if (!freshSnippet.isBlank()) {
+                    cached.setSnippet(freshSnippet);
+                }
                 if (detail.attachmentNames() != null && !detail.attachmentNames().isEmpty()) {
                     cached.setAttachmentNames(String.join(";", detail.attachmentNames()));
                 }

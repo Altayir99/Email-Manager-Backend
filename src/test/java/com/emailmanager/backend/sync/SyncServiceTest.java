@@ -453,7 +453,9 @@ class SyncServiceTest {
 
             // Should not throw — bad account is caught, good account still runs
             assertThatCode(() -> syncService.syncAll()).doesNotThrowAnyException();
-            verify(imapConnectionService).acquireStore(goodAccount);
+            // Multi-folder syncAll acquires the store multiple times per account
+            // (folder discovery + per-folder sync), so assert it ran at all.
+            verify(imapConnectionService, atLeastOnce()).acquireStore(goodAccount);
         }
     }
 

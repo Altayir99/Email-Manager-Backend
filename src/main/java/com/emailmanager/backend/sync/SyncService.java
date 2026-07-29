@@ -44,7 +44,6 @@ public class SyncService {
 
     private static final String INBOX = "INBOX";
     private static final int INITIAL_SYNC_COUNT  = 500;
-    private static final int SNIPPET_MAX          = 200;
     private static final int FLAG_RECONCILE_WINDOW = 200;
     private static final int FLAG_RECONCILE_INTERVAL_MINUTES = 5;
 
@@ -84,17 +83,24 @@ public class SyncService {
         List<EmailAccount> accounts = accountRepository.findAllWithUser();
         for (EmailAccount account : accounts) {
             if (!account.isActive()) continue;
-            // Use RFC 6154 discovery for ALL accounts — locale-independent.
-            // This correctly handles German Google Workspace accounts where
-            // [Gmail]/Sent Mail is actually [Gmail]/Gesendet, etc.
-            List<String> folders = folderCache.computeIfAbsent(
-                    account.getId(), id -> discoverImapFolders(account));
-            for (String folder : folders) {
-                try {
-                    syncAccountFolder(account, folder);
-                } catch (Exception e) {
-                    log.warn("[Sync] {}/{} failed: {}", account.getEmailAddress(), folder, e.getMessage());
+            // Wrap the whole per-account cycle so a failure during folder
+            // discovery (e.g. IMAP connection refused) does NOT abort the sync
+            // run for every remaining account.
+            try {
+                // Use RFC 6154 discovery for ALL accounts — locale-independent.
+                // This correctly handles German Google Workspace accounts where
+                // [Gmail]/Sent Mail is actually [Gmail]/Gesendet, etc.
+                List<String> folders = folderCache.computeIfAbsent(
+                        account.getId(), id -> discoverImapFolders(account));
+                for (String folder : folders) {
+                    try {
+                        syncAccountFolder(account, folder);
+                    } catch (Exception e) {
+                        log.warn("[Sync] {}/{} failed: {}", account.getEmailAddress(), folder, e.getMessage());
+                    }
                 }
+            } catch (Exception e) {
+                log.warn("[Sync] account cycle failed for {}: {}", account.getEmailAddress(), e.getMessage());
             }
         }
     }
@@ -468,7 +474,7 @@ public class SyncService {
                 ? received.toInstant().atZone(ZoneOffset.UTC).toLocalDateTime()
                 : LocalDateTime.now(ZoneOffset.UTC);
 
-        String snippet = extractSnippet(msg);
+        String snippet = SnippetExtractor.fromMessage(msg);
 
         String[] messageIdHeader = null;
         try { messageIdHeader = msg.getHeader("Message-ID"); } catch (Exception ignored) {}
@@ -518,37 +524,6 @@ public class SyncService {
             String ct = msg.getContentType();
             return ct != null && ct.toLowerCase().contains("mixed");
         } catch (Exception ignored) { return false; }
-    }
-
-    private String extractSnippet(Message msg) {
-        try {
-            Object content = msg.getContent();
-            if (content instanceof String s) {
-                String ct = msg.getContentType().toLowerCase();
-                String text = ct.contains("html") ? stripTags(s) : s;
-                return truncate(text.trim());
-            }
-            if (content instanceof jakarta.mail.internet.MimeMultipart mp) {
-                for (int i = 0; i < mp.getCount(); i++) {
-                    BodyPart part = mp.getBodyPart(i);
-                    if (part.getContentType().toLowerCase().contains("text/plain")) {
-                        return truncate(part.getContent().toString().trim());
-                    }
-                }
-            }
-        } catch (Exception ignored) {}
-        return "";
-    }
-
-    private String truncate(String text) {
-        if (text == null) return "";
-        text = text.replaceAll("\\s+", " ").trim();
-        return text.length() > SNIPPET_MAX ? text.substring(0, SNIPPET_MAX) + "…" : text;
-    }
-
-    private String stripTags(String html) {
-        return html.replaceAll("<[^>]+>", " ").replaceAll("&nbsp;", " ")
-                .replaceAll("&amp;", "&").replaceAll("\\s+", " ").trim();
     }
 
     // ── Status helpers ───────────────────────────────────────────────────────

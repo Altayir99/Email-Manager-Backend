@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -25,12 +26,17 @@ import java.util.regex.Pattern;
  * Builds a cross-folder conversation view (INBOX + Sent + All-Mail) for a
  * message, cache-first (no IMAP in the request path).
  *
- * <p>Threading is subject-based (no DB migration): the anchor's subject is
- * normalized by iteratively stripping leading reply/forward prefixes
- * (re:/fwd:/fw:/aw:/wg:), and every cached message across the relevant folders
- * whose normalized subject matches is merged, de-duplicated by Message-ID
- * (Gmail mirrors the same message in INBOX/Sent AND All-Mail) and returned in
- * ascending chronological order.
+ * <p><b>Threading (Gmail-style):</b> primarily by the RFC 5322 reply chain —
+ * the anchor's {@code Message-ID} / {@code In-Reply-To} / {@code References}
+ * headers determine the thread root, and every cached message across the
+ * relevant folders that links into that chain is merged. When the anchor has no
+ * header data (old cached rows synced before V5), it <b>falls back</b> to the
+ * normalized-subject grouping. Results are de-duplicated by Message-ID
+ * (Gmail mirrors the same message in INBOX/Sent AND All-Mail), ordered
+ * ascending by time, and capped.
+ *
+ * <p>Note: old cache rows lack the new headers, so the subject fallback applies
+ * to them; newly synced / re-synced mails thread exactly by reference.
  */
 @Service
 @RequiredArgsConstructor
@@ -63,6 +69,17 @@ public class ConversationService {
         return s.toLowerCase();
     }
 
+    /** Splits an In-Reply-To / References header into individual Message-ID tokens. */
+    static List<String> parseIds(String header) {
+        if (header == null || header.isBlank()) return List.of();
+        List<String> out = new ArrayList<>();
+        for (String tok : header.trim().split("\\s+")) {
+            String s = tok.trim();
+            if (!s.isBlank()) out.add(s);
+        }
+        return out;
+    }
+
     /**
      * Returns the conversation for the message identified by (folder, uid),
      * ascending by received time. Cache-only. Returns just the anchor if no
@@ -80,38 +97,26 @@ public class ConversationService {
         }
 
         String accountAddress = account.getEmailAddress();
-        String key = normalizeSubject(anchor.getSubject());
-        if (key.isBlank()) {
-            // Nothing meaningful to thread on — return just the anchor.
-            return List.of(toDto(anchor, resolveSent(account), accountAddress));
-        }
+        String sentFolder = resolveSent(account);
 
         // Folders to search: INBOX + resolved Sent + resolved All-Mail + the anchor's own folder.
-        String sentFolder = resolveSent(account);
         Set<String> folders = new LinkedHashSet<>();
         folders.add(INBOX);
         if (sentFolder != null) folders.add(sentFolder);
         folderResolver.resolve(account, SpecialUse.ALL_MAIL).ifPresent(folders::add);
-        folders.add(folder); // ensure the anchor's folder is covered (e.g. a custom label)
+        folders.add(folder);
 
-        List<CachedEmail> candidates = cachedEmailRepository.findThreadCandidates(
-                accountId, folders, key, PageRequest.of(0, CANDIDATE_CAP));
-
-        // Exact match on the normalized key (SQL LIKE is a coarse pre-filter).
-        List<CachedEmail> matched = new ArrayList<>();
-        boolean anchorSeen = false;
-        for (CachedEmail e : candidates) {
-            if (normalizeSubject(e.getSubject()).equals(key)) {
-                matched.add(e);
-                if (e.getFolder().equals(folder) && e.getUid() == uid) anchorSeen = true;
-            }
+        // Primary: reference-chain threading. Falls back to subject when the
+        // anchor carries no usable header data (old rows).
+        List<CachedEmail> matched = threadByReferences(accountId, anchor, folders);
+        if (matched == null) {
+            matched = threadBySubject(accountId, anchor, folders);
         }
-        if (!anchorSeen) matched.add(anchor); // safety: always include the anchor
+        if (matched == null || matched.isEmpty()) {
+            return List.of(toDto(anchor, sentFolder, accountAddress));
+        }
 
-        // De-duplicate by Message-ID, preferring INBOX/Sent over All-Mail.
         List<CachedEmail> deduped = dedupeByMessageId(matched, sentFolder, account);
-
-        // Ascending chronological order (nulls last), capped.
         deduped.sort(Comparator.comparing(CachedEmail::getReceivedAt,
                 Comparator.nullsLast(Comparator.naturalOrder())));
 
@@ -121,10 +126,99 @@ public class ConversationService {
                 .toList();
     }
 
+    // ── Reference-chain threading (primary) ──────────────────────────────────
+
+    /**
+     * Groups by the RFC reply chain. Returns null when the anchor has no header
+     * data at all (caller then falls back to subject grouping).
+     */
+    private List<CachedEmail> threadByReferences(UUID accountId, CachedEmail anchor, Set<String> folders) {
+        List<String> anchorRefs = parseIds(anchor.getReferences());
+        String rootId = !anchorRefs.isEmpty()
+                ? anchorRefs.get(0)
+                : (notBlank(anchor.getMessageId()) ? anchor.getMessageId() : null);
+        if (rootId == null) return null; // no header data → subject fallback
+
+        Set<String> ids = new HashSet<>();
+        addIfNotBlank(ids, rootId);
+        addIfNotBlank(ids, anchor.getMessageId());
+        addIfNotBlank(ids, anchor.getInReplyTo());
+        ids.addAll(anchorRefs);
+
+        List<CachedEmail> candidates = cachedEmailRepository.findThreadByReferences(
+                accountId, folders, ids, rootId, PageRequest.of(0, CANDIDATE_CAP));
+
+        // Transitive membership expansion to a fixpoint (bounded by candidate cap).
+        Set<String> threadIds = new HashSet<>(ids);
+        Set<CachedEmail> accepted = new LinkedHashSet<>();
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (CachedEmail e : candidates) {
+                if (accepted.contains(e)) continue;
+                if (belongsToChain(e, threadIds, rootId)) {
+                    accepted.add(e);
+                    if (notBlank(e.getMessageId()) && threadIds.add(e.getMessageId())) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        List<CachedEmail> matched = new ArrayList<>(accepted);
+        if (matched.stream().noneMatch(e -> sameRow(e, anchor))) {
+            matched.add(anchor); // safety: always include the anchor
+        }
+        return matched;
+    }
+
+    private boolean belongsToChain(CachedEmail e, Set<String> threadIds, String rootId) {
+        if (notBlank(e.getMessageId()) && threadIds.contains(e.getMessageId())) return true;
+        if (notBlank(e.getInReplyTo()) && threadIds.contains(e.getInReplyTo())) return true;
+        for (String r : parseIds(e.getReferences())) {
+            if (threadIds.contains(r)) return true;
+        }
+        return notBlank(e.getReferences()) && e.getReferences().contains(rootId);
+    }
+
+    // ── Subject threading (fallback) ─────────────────────────────────────────
+
+    /** Returns null when the normalized subject is blank (nothing to thread on). */
+    private List<CachedEmail> threadBySubject(UUID accountId, CachedEmail anchor, Set<String> folders) {
+        String key = normalizeSubject(anchor.getSubject());
+        if (key.isBlank()) return null;
+
+        List<CachedEmail> candidates = cachedEmailRepository.findThreadCandidates(
+                accountId, folders, key, PageRequest.of(0, CANDIDATE_CAP));
+
+        List<CachedEmail> matched = new ArrayList<>();
+        boolean anchorSeen = false;
+        for (CachedEmail e : candidates) {
+            if (normalizeSubject(e.getSubject()).equals(key)) {
+                matched.add(e);
+                if (sameRow(e, anchor)) anchorSeen = true;
+            }
+        }
+        if (!anchorSeen) matched.add(anchor);
+        return matched;
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private String resolveSent(EmailAccount account) {
         return folderResolver.resolve(account, SpecialUse.SENT).orElse(null);
+    }
+
+    private static boolean notBlank(String s) {
+        return s != null && !s.isBlank();
+    }
+
+    private static void addIfNotBlank(Set<String> set, String s) {
+        if (notBlank(s)) set.add(s);
+    }
+
+    private static boolean sameRow(CachedEmail a, CachedEmail b) {
+        return a.getUid() == b.getUid() && a.getFolder().equals(b.getFolder());
     }
 
     /**
@@ -168,7 +262,7 @@ public class ConversationService {
                 || (e.getFromAddress() != null && accountAddress != null
                     && e.getFromAddress().equalsIgnoreCase(accountAddress));
         return new ConversationMessageDto(
-                e.getUid(), e.getFolder(), e.getSubject(),
+                e.getUid(), e.getFolder(), e.getMessageId(), e.getSubject(),
                 e.getFromAddress(), e.getFromName(),
                 e.getReceivedAt(), e.isSeen(), e.isHasAttachment(),
                 outgoing);

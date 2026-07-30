@@ -126,6 +126,23 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
             Pageable pageable);
 
     /**
+     * Reference-chain thread candidates: cached emails for an account across the
+     * given folders whose Message-ID is one of the known chain ids, OR whose
+     * References header contains the thread root id. The caller then expands the
+     * membership transitively in Java. Bounded by the caller via Pageable.
+     */
+    @Query("SELECT e FROM CachedEmail e WHERE e.accountId = :accountId " +
+           "AND e.folder IN :folders " +
+           "AND (e.messageId IN :ids " +
+           "     OR (:rootId IS NOT NULL AND e.references LIKE CONCAT('%', :rootId, '%')))")
+    List<CachedEmail> findThreadByReferences(
+            @Param("accountId") UUID accountId,
+            @Param("folders") java.util.Collection<String> folders,
+            @Param("ids") java.util.Collection<String> ids,
+            @Param("rootId") String rootId,
+            Pageable pageable);
+
+    /**
      * Cross-folder thread candidates: all cached emails for an account in the
      * given folders whose subject contains the normalized subject core.
      * This is a coarse SQL pre-filter — the caller then filters exactly by the

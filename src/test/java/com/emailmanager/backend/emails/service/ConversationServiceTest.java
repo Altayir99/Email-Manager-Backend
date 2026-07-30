@@ -54,13 +54,17 @@ class ConversationServiceTest {
         when(folderResolver.resolve(account, SpecialUse.ALL_MAIL)).thenReturn(Optional.of(ALL_MAIL));
     }
 
-    private CachedEmail email(String folder, long uid, String messageId, String subject,
-                              String fromAddress, LocalDateTime receivedAt) {
+    /** Full builder incl. threading headers. */
+    private CachedEmail email(String folder, long uid, String messageId, String inReplyTo,
+                              String references, String subject, String fromAddress,
+                              LocalDateTime receivedAt) {
         return CachedEmail.builder()
                 .accountId(accountId)
                 .folder(folder)
                 .uid(uid)
                 .messageId(messageId)
+                .inReplyTo(inReplyTo)
+                .references(references)
                 .subject(subject)
                 .fromAddress(fromAddress)
                 .fromName(fromAddress)
@@ -75,110 +79,126 @@ class ConversationServiceTest {
                 .thenReturn(Optional.of(e));
     }
 
-    private void candidates(CachedEmail... list) {
+    private void refCandidates(CachedEmail... list) {
+        when(cachedEmailRepository.findThreadByReferences(eq(accountId), any(), any(), any(), any()))
+                .thenReturn(List.of(list));
+    }
+
+    private void subjectCandidates(CachedEmail... list) {
         when(cachedEmailRepository.findThreadCandidates(eq(accountId), any(), any(), any()))
                 .thenReturn(List.of(list));
     }
 
-    // ── Subject normalization ────────────────────────────────────────────────
+    // ── Pure helpers ─────────────────────────────────────────────────────────
 
     @Nested
-    @DisplayName("normalizeSubject")
-    class Normalize {
+    @DisplayName("normalizeSubject / parseIds")
+    class Helpers {
         @Test
-        @DisplayName("strips Re:/Fwd:/Aw:/Wg: (nested, case-insensitive) and lower-cases")
-        void stripsPrefixes() {
-            assertThat(ConversationService.normalizeSubject("Re: Arbeitszeit")).isEqualTo("arbeitszeit");
-            assertThat(ConversationService.normalizeSubject("FWD: Arbeitszeit")).isEqualTo("arbeitszeit");
-            assertThat(ConversationService.normalizeSubject("AW: Arbeitszeit")).isEqualTo("arbeitszeit");
-            assertThat(ConversationService.normalizeSubject("WG: Arbeitszeit")).isEqualTo("arbeitszeit");
-            assertThat(ConversationService.normalizeSubject("Re: Fwd:  Arbeitszeit")).isEqualTo("arbeitszeit");
-            assertThat(ConversationService.normalizeSubject("  aw:re: Arbeitszeit  ")).isEqualTo("arbeitszeit");
+        @DisplayName("normalizeSubject strips prefixes (nested, case-insensitive)")
+        void normalize() {
+            assertThat(ConversationService.normalizeSubject("Re: Fwd: AW: Info")).isEqualTo("info");
+            assertThat(ConversationService.normalizeSubject(null)).isEmpty();
         }
 
         @Test
-        @DisplayName("null / empty → empty string")
-        void nullEmpty() {
-            assertThat(ConversationService.normalizeSubject(null)).isEmpty();
-            assertThat(ConversationService.normalizeSubject("   ")).isEmpty();
+        @DisplayName("parseIds splits whitespace-separated Message-IDs")
+        void parse() {
+            assertThat(ConversationService.parseIds("<a@x>  <b@x>\t<c@x>"))
+                    .containsExactly("<a@x>", "<b@x>", "<c@x>");
+            assertThat(ConversationService.parseIds(null)).isEmpty();
         }
     }
 
-    // ── Merge, dedup, sort, outgoing ─────────────────────────────────────────
+    // ── Reference-chain threading (primary) ──────────────────────────────────
 
     @Nested
-    @DisplayName("getConversation")
-    class GetConversation {
+    @DisplayName("Reference-chain threading")
+    class ReferenceThreading {
 
         @Test
-        @DisplayName("merges INBOX + Sent, ascending by time, with correct outgoing flags")
-        void mergesAndSorts() {
+        @DisplayName("merges the reply chain across INBOX + Sent, ascending, with outgoing flags")
+        void mergesChain() {
             var t0 = LocalDateTime.of(2026, 7, 20, 9, 0);
-            var inbound1 = email("INBOX", 10, "<a@x>", "Korrigierte Arbeitszeitnachweise", "demir@x.com", t0);
-            var reply    = email(SENT, 5, "<b@x>", "Re: Korrigierte Arbeitszeitnachweise", "owner@example.com", t0.plusHours(1));
-            var inbound2 = email("INBOX", 11, "<c@x>", "Re: Korrigierte Arbeitszeitnachweise", "demir@x.com", t0.plusHours(2));
+            var root  = email("INBOX", 10, "<m1>", null, null,
+                    "Korrigierte Arbeitszeitnachweise", "demir@x.com", t0);
+            var reply = email(SENT, 5, "<m2>", "<m1>", "<m1>",
+                    "Re: Korrigierte Arbeitszeitnachweise", "owner@example.com", t0.plusHours(1));
+            var inbound2 = email("INBOX", 11, "<m3>", "<m2>", "<m1> <m2>",
+                    "Re: Korrigierte Arbeitszeitnachweise", "demir@x.com", t0.plusHours(2));
 
-            anchor(inbound1);
-            // Deliberately out of order to prove sorting.
-            candidates(inbound2, inbound1, reply);
+            anchor(root);
+            refCandidates(inbound2, reply, root); // deliberately unordered
 
             List<ConversationMessageDto> result = service.getConversation(account, "INBOX", 10);
 
             assertThat(result).extracting(ConversationMessageDto::uid)
-                    .containsExactly(10L, 5L, 11L);   // ascending by receivedAt
+                    .containsExactly(10L, 5L, 11L);
             assertThat(result).extracting(ConversationMessageDto::outgoing)
                     .containsExactly(false, true, false);
         }
 
         @Test
-        @DisplayName("outgoing is true when fromAddress matches the account (even outside Sent)")
-        void outgoingByFromAddress() {
+        @DisplayName("does NOT pull in a same-subject message from a different chain")
+        void ignoresUnrelatedSameSubject() {
             var t0 = LocalDateTime.of(2026, 7, 20, 9, 0);
-            var mine = email(ALL_MAIL, 99, "<mine@x>", "Projekt", "OWNER@example.com", t0);
-            anchor(mine);
-            candidates(mine);
+            var root = email("INBOX", 10, "<m1>", null, null, "Info", "a@x.com", t0);
+            // Same subject "Info" but no link into the chain (own message-id, no refs).
+            var unrelated = email("INBOX", 12, "<other>", null, null, "Info", "stranger@x.com", t0.plusHours(1));
 
-            var result = service.getConversation(account, ALL_MAIL, 99);
-            assertThat(result).hasSize(1);
-            assertThat(result.get(0).outgoing()).isTrue();
-        }
-
-        @Test
-        @DisplayName("dedupes by message_id, preferring INBOX/Sent over All-Mail")
-        void dedupesByMessageId() {
-            var t0 = LocalDateTime.of(2026, 7, 20, 9, 0);
-            var inInbox   = email("INBOX", 10, "<dup@x>", "Angebot", "demir@x.com", t0);
-            var inAllMail = email(ALL_MAIL, 800, "<dup@x>", "Angebot", "demir@x.com", t0);
-            var replyMine   = email(SENT, 5, "<mine@x>", "Re: Angebot", "owner@example.com", t0.plusHours(1));
-            var replyMirror = email(ALL_MAIL, 801, "<mine@x>", "Re: Angebot", "owner@example.com", t0.plusHours(1));
-
-            anchor(inInbox);
-            candidates(inAllMail, inInbox, replyMirror, replyMine);
-
-            var result = service.getConversation(account, "INBOX", 10);
-
-            assertThat(result).hasSize(2); // 4 rows → 2 unique message-ids
-            // Kept the INBOX copy (uid 10) and the Sent copy (uid 5), not the All-Mail mirrors.
-            assertThat(result).extracting(ConversationMessageDto::folder)
-                    .containsExactly("INBOX", SENT);
-            assertThat(result).extracting(ConversationMessageDto::uid)
-                    .containsExactly(10L, 5L);
-        }
-
-        @Test
-        @DisplayName("excludes candidates whose normalized subject differs (SQL LIKE false positive)")
-        void excludesNonMatchingSubject() {
-            var t0 = LocalDateTime.of(2026, 7, 20, 9, 0);
-            var anchorMsg = email("INBOX", 10, "<a@x>", "Angebot", "demir@x.com", t0);
-            var unrelated = email("INBOX", 12, "<z@x>", "Angebot 2024 Nachtrag", "x@y.com", t0.plusHours(1));
-
-            anchor(anchorMsg);
-            candidates(anchorMsg, unrelated);
+            anchor(root);
+            refCandidates(root, unrelated);
 
             var result = service.getConversation(account, "INBOX", 10);
             assertThat(result).extracting(ConversationMessageDto::uid).containsExactly(10L);
         }
 
+        @Test
+        @DisplayName("dedupes by message_id, preferring INBOX/Sent over All-Mail")
+        void dedupes() {
+            var t0 = LocalDateTime.of(2026, 7, 20, 9, 0);
+            var rootInbox   = email("INBOX", 10, "<m1>", null, null, "Angebot", "demir@x.com", t0);
+            var rootMirror  = email(ALL_MAIL, 800, "<m1>", null, null, "Angebot", "demir@x.com", t0);
+            var replySent   = email(SENT, 5, "<m2>", "<m1>", "<m1>", "Re: Angebot", "owner@example.com", t0.plusHours(1));
+            var replyMirror = email(ALL_MAIL, 801, "<m2>", "<m1>", "<m1>", "Re: Angebot", "owner@example.com", t0.plusHours(1));
+
+            anchor(rootInbox);
+            refCandidates(rootMirror, rootInbox, replyMirror, replySent);
+
+            var result = service.getConversation(account, "INBOX", 10);
+
+            assertThat(result).hasSize(2);
+            assertThat(result).extracting(ConversationMessageDto::folder)
+                    .containsExactly("INBOX", SENT);
+        }
+    }
+
+    // ── Subject fallback (old rows without headers) ──────────────────────────
+
+    @Nested
+    @DisplayName("Subject fallback")
+    class SubjectFallback {
+
+        @Test
+        @DisplayName("groups by normalized subject when the anchor has no header data")
+        void fallsBackToSubject() {
+            var t0 = LocalDateTime.of(2026, 7, 20, 9, 0);
+            // No messageId / references → reference threading returns null → subject.
+            var a = email("INBOX", 10, null, null, null, "Rechnung Juni", "demir@x.com", t0);
+            var b = email(SENT, 5, null, null, null, "Re: Rechnung Juni", "owner@example.com", t0.plusHours(1));
+            var unrelated = email("INBOX", 12, null, null, null, "Rechnung Juni 2024", "x@y.com", t0.plusHours(2));
+
+            anchor(a);
+            subjectCandidates(a, b, unrelated);
+
+            var result = service.getConversation(account, "INBOX", 10);
+            assertThat(result).extracting(ConversationMessageDto::uid).containsExactly(10L, 5L);
+        }
+    }
+
+    @Nested
+    @DisplayName("Edge cases")
+    class Edge {
         @Test
         @DisplayName("returns empty when the anchor is not in cache")
         void emptyWhenAnchorMissing() {

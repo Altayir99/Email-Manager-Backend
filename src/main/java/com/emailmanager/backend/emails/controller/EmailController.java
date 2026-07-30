@@ -289,10 +289,11 @@ public class EmailController {
             @RequestParam(required = false) String bodyHtml,
             @RequestParam(required = false) List<String> cc,
             @RequestParam(required = false) List<String> bcc,
+            @RequestParam(required = false) String inReplyTo,
             @RequestPart(required = false) MultipartFile attachment) {
 
         EmailAccount account = accountService.getAccountEntity(user.getUsername(), accountId);
-        SendEmailRequest request = new SendEmailRequest(to, cc, bcc, subject, bodyHtml, bodyText);
+        SendEmailRequest request = new SendEmailRequest(to, cc, bcc, subject, bodyHtml, bodyText, inReplyTo);
         PendingSendResponse response = scheduledSendService.queueSend(account, request, attachment);
         return ResponseEntity.ok(response);
     }

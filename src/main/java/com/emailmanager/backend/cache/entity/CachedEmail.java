@@ -29,6 +29,14 @@ public class CachedEmail {
     @Column(name = "message_id", length = 512)
     private String messageId;
 
+    /** RFC 5322 In-Reply-To header — the Message-ID this message replies to. */
+    @Column(name = "in_reply_to", length = 512)
+    private String inReplyTo;
+
+    /** RFC 5322 References header — the full space-separated Message-ID chain. */
+    @Column(name = "msg_references", columnDefinition = "TEXT")
+    private String references;
+
     @Column(columnDefinition = "TEXT")
     private String subject;
 

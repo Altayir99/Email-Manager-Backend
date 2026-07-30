@@ -398,16 +398,17 @@ public class SyncService {
 
         String snippet = SnippetExtractor.fromMessage(msg);
 
-        String[] messageIdHeader = null;
-        try { messageIdHeader = msg.getHeader("Message-ID"); } catch (Exception ignored) {}
-        String messageId = (messageIdHeader != null && messageIdHeader.length > 0)
-                ? messageIdHeader[0] : null;
+        String messageId = firstHeader(msg, "Message-ID");
+        String inReplyTo = firstHeader(msg, "In-Reply-To");
+        String references = firstHeader(msg, "References");
 
         return CachedEmail.builder()
                 .accountId(accountId)
                 .folder(folderName)
                 .uid(uid)
                 .messageId(messageId)
+                .inReplyTo(inReplyTo)
+                .references(references)
                 .subject(subject)
                 .fromAddress(fromAddress)
                 .fromName(fromName)
@@ -426,6 +427,16 @@ public class SyncService {
      * in the format "Display Name <email@example.com>".
      * Returns null if the array is null or empty.
      */
+    /** Returns the first value of a header, or null if absent/unreadable. */
+    private String firstHeader(Message msg, String name) {
+        try {
+            String[] values = msg.getHeader(name);
+            return (values != null && values.length > 0) ? values[0] : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     private String extractAddresses(Address[] addresses) {
         if (addresses == null || addresses.length == 0) return null;
         return Arrays.stream(addresses)

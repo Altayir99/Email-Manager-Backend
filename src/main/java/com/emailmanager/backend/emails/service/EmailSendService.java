@@ -87,6 +87,13 @@ public class EmailSendService {
             message.setSubject(request.subject(), "UTF-8");
             message.setSentDate(new Date());
 
+            // Thread the reply: link to the message being answered so recipients
+            // (and our own conversation view) group it correctly.
+            if (request.inReplyTo() != null && !request.inReplyTo().isBlank()) {
+                message.setHeader("In-Reply-To", request.inReplyTo());
+                message.setHeader("References", request.inReplyTo());
+            }
+
             // ── Build body part ───────────────────────────────────────────────
             MimeBodyPart bodyPart = new MimeBodyPart();
             if (request.bodyHtml() != null && !request.bodyHtml().isBlank()) {
@@ -168,6 +175,12 @@ public class EmailSendService {
             // The next incremental sync will overwrite with the real UID.
             long syntheticUid = -System.currentTimeMillis();
 
+            // Capture the real Message-ID JavaMail assigned during send, so the
+            // conversation view dedupes this row against the eventual IMAP-synced
+            // Sent copy (same message_id) and threads it via References.
+            String sentMessageId = null;
+            try { sentMessageId = message.getMessageID(); } catch (Exception ignored) {}
+
             String snippet = request.bodyText() != null && !request.bodyText().isBlank()
                     ? request.bodyText().substring(0, Math.min(200, request.bodyText().length()))
                     : (request.bodyHtml() != null
@@ -185,6 +198,9 @@ public class EmailSendService {
                     .accountId(account.getId())
                     .folder(sentFolder)
                     .uid(syntheticUid)
+                    .messageId(sentMessageId)
+                    .inReplyTo(request.inReplyTo())
+                    .references(request.inReplyTo())
                     .subject(request.subject())
                     .fromAddress(account.getEmailAddress())
                     .fromName(account.getDisplayName() != null ? account.getDisplayName() : account.getEmailAddress())

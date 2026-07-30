@@ -10,6 +10,8 @@ import java.time.LocalDateTime;
 public record ConversationMessageDto(
         long uid,
         String folder,
+        /** RFC Message-ID — used by the client to set In-Reply-To when replying. */
+        String messageId,
         String subject,
         String fromAddress,
         String fromName,

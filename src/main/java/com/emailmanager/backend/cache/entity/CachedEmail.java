@@ -1,5 +1,6 @@
 package com.emailmanager.backend.cache.entity;
 
+import com.emailmanager.backend.common.TextSanitizer;
 import jakarta.persistence.*;
 import lombok.*;
 import java.time.LocalDateTime;
@@ -84,4 +85,28 @@ public class CachedEmail {
     @Column(name = "body_loaded", nullable = false)
     @Builder.Default
     private boolean bodyLoaded = false;
+
+    /**
+     * Strip NUL bytes from every text field before insert/update — Postgres
+     * rejects 0x00 in text/varchar (SQLState 22021). Covers ALL save() paths
+     * (sync, lazy body load, self-healing snippet, send write-through) and any
+     * future String field automatically.
+     */
+    @PrePersist
+    @PreUpdate
+    private void sanitizeText() {
+        folder          = TextSanitizer.clean(folder);
+        messageId       = TextSanitizer.clean(messageId);
+        inReplyTo       = TextSanitizer.clean(inReplyTo);
+        references      = TextSanitizer.clean(references);
+        subject         = TextSanitizer.clean(subject);
+        fromAddress     = TextSanitizer.clean(fromAddress);
+        fromName        = TextSanitizer.clean(fromName);
+        snippet         = TextSanitizer.clean(snippet);
+        toAddresses     = TextSanitizer.clean(toAddresses);
+        ccAddresses     = TextSanitizer.clean(ccAddresses);
+        bodyText        = TextSanitizer.clean(bodyText);
+        bodyHtml        = TextSanitizer.clean(bodyHtml);
+        attachmentNames = TextSanitizer.clean(attachmentNames);
+    }
 }

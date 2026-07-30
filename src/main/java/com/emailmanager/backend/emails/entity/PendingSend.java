@@ -1,5 +1,6 @@
 package com.emailmanager.backend.emails.entity;
 
+import com.emailmanager.backend.common.TextSanitizer;
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -74,4 +75,20 @@ public class PendingSend {
 
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
+
+    /** Strip NUL bytes before insert/update — Postgres rejects 0x00 in text. */
+    @PrePersist
+    @PreUpdate
+    private void sanitizeText() {
+        toAddress             = TextSanitizer.clean(toAddress);
+        ccAddresses           = TextSanitizer.clean(ccAddresses);
+        bccAddresses          = TextSanitizer.clean(bccAddresses);
+        subject               = TextSanitizer.clean(subject);
+        bodyText              = TextSanitizer.clean(bodyText);
+        bodyHtml              = TextSanitizer.clean(bodyHtml);
+        inReplyTo             = TextSanitizer.clean(inReplyTo);
+        attachmentFilename    = TextSanitizer.clean(attachmentFilename);
+        attachmentContentType = TextSanitizer.clean(attachmentContentType);
+        status                = TextSanitizer.clean(status);
+    }
 }

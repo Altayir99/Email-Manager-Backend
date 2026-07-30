@@ -315,4 +315,72 @@ class CacheRepositoryIntegrationTest {
                     .containsExactlyInAnyOrder("INBOX", "[Gmail]/Sent Mail", "[Gmail]/Drafts");
         }
     }
+
+    @Nested
+    @DisplayName("NUL-byte sanitization (@PrePersist / @PreUpdate)")
+    class NulSanitization {
+
+        /** The forbidden NUL byte, built without a source-file escape. */
+        private static final String NUL = String.valueOf((char) 0);
+
+        @Test
+        @DisplayName("a CachedEmail with 0x00 in subject/body/message_id persists cleanly")
+        void persistsWithoutNul() {
+            CachedEmail e = CachedEmail.builder()
+                    .accountId(accountId)
+                    .folder("INBOX")
+                    .uid(9001L)
+                    .messageId("<a" + NUL + "b@x>")
+                    .subject("a" + NUL + "b")
+                    .fromAddress("sender@example.com")
+                    .fromName("Send" + NUL + "er")
+                    .snippet("sn" + NUL + "ip")
+                    .bodyText("hello" + NUL + "world")
+                    .bodyHtml("<p>hi" + NUL + "</p>")
+                    .receivedAt(LocalDateTime.now())
+                    .seen(false)
+                    .hasAttachment(false)
+                    .bodyLoaded(true)
+                    .build();
+
+            // saveAndFlush forces the INSERT (fires @PrePersist).
+            emailRepo.saveAndFlush(e);
+
+            CachedEmail read = emailRepo
+                    .findByAccountIdAndFolderAndUid(accountId, "INBOX", 9001L)
+                    .orElseThrow();
+
+            assertThat(read.getSubject()).isEqualTo("ab");
+            assertThat(read.getMessageId()).isEqualTo("<ab@x>");
+            assertThat(read.getFromName()).isEqualTo("Sender");
+            assertThat(read.getSnippet()).isEqualTo("snip");
+            assertThat(read.getBodyText()).isEqualTo("helloworld");
+            assertThat(read.getBodyHtml()).isEqualTo("<p>hi</p>");
+            // No field retains a NUL byte.
+            assertThat(read.getSubject()).doesNotContain(NUL);
+            assertThat(read.getBodyText()).doesNotContain(NUL);
+        }
+
+        @Test
+        @DisplayName("@PreUpdate sanitizes a NUL introduced on a later update (lazy body load)")
+        void sanitizesOnUpdate() {
+            CachedEmail e = CachedEmail.builder()
+                    .accountId(accountId).folder("INBOX").uid(9002L)
+                    .subject("clean").fromAddress("s@x").fromName("S")
+                    .receivedAt(LocalDateTime.now())
+                    .seen(false).hasAttachment(false).bodyLoaded(false)
+                    .build();
+            emailRepo.saveAndFlush(e);
+
+            // Simulate the lazy body-load write-through storing a NUL-laden body.
+            e.setBodyText("body" + NUL + "text");
+            e.setBodyLoaded(true);
+            emailRepo.saveAndFlush(e);
+
+            CachedEmail read = emailRepo
+                    .findByAccountIdAndFolderAndUid(accountId, "INBOX", 9002L)
+                    .orElseThrow();
+            assertThat(read.getBodyText()).isEqualTo("bodytext");
+        }
+    }
 }

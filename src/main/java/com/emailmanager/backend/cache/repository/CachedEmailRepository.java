@@ -126,6 +126,23 @@ public interface CachedEmailRepository extends JpaRepository<CachedEmail, UUID> 
             Pageable pageable);
 
     /**
+     * Cross-folder thread candidates: all cached emails for an account in the
+     * given folders whose subject contains the normalized subject core.
+     * This is a coarse SQL pre-filter — the caller then filters exactly by the
+     * normalized subject key in Java (strips Re:/Fwd:/Aw: etc.). Bounded by the
+     * caller via Pageable to keep the result set small.
+     */
+    @Query("SELECT e FROM CachedEmail e WHERE e.accountId = :accountId " +
+           "AND e.folder IN :folders " +
+           "AND LOWER(e.subject) LIKE LOWER(CONCAT('%', :subjectCore, '%')) " +
+           "ORDER BY e.receivedAt ASC")
+    List<CachedEmail> findThreadCandidates(
+            @Param("accountId") UUID accountId,
+            @Param("folders") java.util.Collection<String> folders,
+            @Param("subjectCore") String subjectCore,
+            Pageable pageable);
+
+    /**
      * Contact autocomplete: distinct fromAddress + fromName pairs for an account
      * where fromAddress starts with or contains the query string.
      * Returns Object[] rows: [fromAddress, fromName].

@@ -7,6 +7,7 @@ import com.emailmanager.backend.cache.entity.FolderState;
 import com.emailmanager.backend.cache.repository.CachedEmailRepository;
 import com.emailmanager.backend.cache.repository.FolderStateRepository;
 import com.emailmanager.backend.emails.dto.*;
+import com.emailmanager.backend.emails.service.ConversationService;
 import com.emailmanager.backend.emails.service.EmailActionService;
 import com.emailmanager.backend.emails.service.EmailFetchService;
 import com.emailmanager.backend.emails.service.EmailSearchService;
@@ -54,6 +55,7 @@ public class EmailController {
     private final ScheduledSendService scheduledSendService;
     private final EmailActionService actionService;
     private final EmailSearchService searchService;
+    private final ConversationService conversationService;
     private final SyncService syncService;
 
     // ── Cache repositories (read path) ───────────────────────────────────────
@@ -193,6 +195,25 @@ public class EmailController {
         }
     }
 
+
+    // ── Conversation (cross-folder thread) — served from cache ───────────────
+
+    /**
+     * Returns the full conversation for a message, merged across INBOX + Sent +
+     * All-Mail and ordered ascending by time — so the owner's own replies (from
+     * "Gesendet") appear inline. Cache-first (no IMAP). Body is lazy-loaded per
+     * message via the normal detail endpoint when expanded.
+     */
+    @GetMapping("/emails/{uid}/thread")
+    public ResponseEntity<List<ConversationMessageDto>> getConversation(
+            @AuthenticationPrincipal UserDetails user,
+            @PathVariable UUID accountId,
+            @PathVariable long uid,
+            @RequestParam(defaultValue = "INBOX") String folder) {
+
+        EmailAccount account = accountService.getAccountEntity(user.getUsername(), accountId);
+        return ResponseEntity.ok(conversationService.getConversation(account, folder, uid));
+    }
 
     // ── Search — cache (default) or IMAP (live) ─────────────────────────────
 

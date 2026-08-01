@@ -17,7 +17,9 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Properties;
 
 @Service
@@ -38,15 +40,20 @@ public class EmailSendService {
      * Overload without attachment — kept for internal calls that don't need a file.
      */
     public void sendEmail(EmailAccount account, SendEmailRequest request) {
-        sendEmail(account, request, null);
+        sendEmail(account, request, (List<MultipartFile>) null);
+    }
+
+    /** Single-file convenience overload — wraps in a list. */
+    public void sendEmail(EmailAccount account, SendEmailRequest request, MultipartFile attachment) {
+        sendEmail(account, request, attachment != null ? List.of(attachment) : null);
     }
 
     /**
-     * Send an email with an optional PDF (or any file) attachment.
+     * Send an email with zero or more file attachments.
      *
-     * @param attachment nullable — when null, behaves identically to the old code
+     * @param attachments nullable or empty — when null/empty behaves identically to the old no-attachment code
      */
-    public void sendEmail(EmailAccount account, SendEmailRequest request, MultipartFile attachment) {
+    public void sendEmail(EmailAccount account, SendEmailRequest request, List<MultipartFile> attachments) {
         MimeMessage message;
         Session session;
 
@@ -114,24 +121,28 @@ public class EmailSendService {
                 bodyPart.setText(request.bodyText() != null ? request.bodyText() : "", "UTF-8");
             }
 
-            // ── Attach file if provided ────────────────────────────────────────
-            if (attachment != null && !attachment.isEmpty()) {
+            // ── Attach files if provided ───────────────────────────────────────
+            boolean hasAttachments = attachments != null && !attachments.isEmpty()
+                    && attachments.stream().anyMatch(a -> a != null && !a.isEmpty());
+            if (hasAttachments) {
                 MimeMultipart mixedMultipart = new MimeMultipart("mixed");
                 mixedMultipart.addBodyPart(bodyPart);
 
-                MimeBodyPart attachPart = new MimeBodyPart();
-                String filename = attachment.getOriginalFilename() != null
-                        ? attachment.getOriginalFilename() : "attachment";
-                attachPart.setFileName(MimeUtility.encodeText(filename, "UTF-8", "B"));
-                attachPart.setContent(attachment.getBytes(),
-                        attachment.getContentType() != null
-                                ? attachment.getContentType()
-                                : "application/octet-stream");
-                mixedMultipart.addBodyPart(attachPart);
+                for (MultipartFile attachment : attachments) {
+                    if (attachment == null || attachment.isEmpty()) continue;
+                    MimeBodyPart attachPart = new MimeBodyPart();
+                    String filename = attachment.getOriginalFilename() != null
+                            ? attachment.getOriginalFilename() : "attachment";
+                    attachPart.setFileName(MimeUtility.encodeText(filename, "UTF-8", "B"));
+                    attachPart.setContent(attachment.getBytes(),
+                            attachment.getContentType() != null
+                                    ? attachment.getContentType()
+                                    : "application/octet-stream");
+                    mixedMultipart.addBodyPart(attachPart);
+                    log.info("Attaching '{}' ({} bytes) to email from {}",
+                            filename, attachment.getSize(), account.getEmailAddress());
+                }
                 message.setContent(mixedMultipart);
-
-                log.info("Attaching '{}' ({} bytes) to email from {}",
-                        filename, attachment.getSize(), account.getEmailAddress());
             } else {
                 // No attachment — set body directly
                 if (request.bodyHtml() != null && !request.bodyHtml().isBlank()) {
@@ -188,11 +199,16 @@ public class EmailSendService {
                             0, Math.min(200, request.bodyHtml().replaceAll("<[^>]+>", "").length()))
                         : "");
 
-            boolean hasAttach = attachment != null && !attachment.isEmpty();
-            String attachmentName = hasAttach
-                    ? (attachment.getOriginalFilename() != null
-                            ? attachment.getOriginalFilename() : "attachment.pdf")
-                    : null;
+            boolean hasAttach = attachments != null && !attachments.isEmpty()
+                    && attachments.stream().anyMatch(a -> a != null && !a.isEmpty());
+            List<String> attachNames = new ArrayList<>();
+            if (hasAttach) {
+                for (MultipartFile a : attachments) {
+                    if (a == null || a.isEmpty()) continue;
+                    attachNames.add(a.getOriginalFilename() != null ? a.getOriginalFilename() : "attachment");
+                }
+            }
+            String attachmentName = hasAttach ? String.join(";", attachNames) : null;
 
             CachedEmail sent = CachedEmail.builder()
                     .accountId(account.getId())

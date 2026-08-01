@@ -13,6 +13,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.File;
@@ -20,6 +23,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -74,26 +78,31 @@ public class ScheduledSendService {
      *
      * @return PendingSendResponse with the sendId and expiry timestamp
      */
-    public PendingSendResponse queueSend(EmailAccount account, SendEmailRequest request, MultipartFile attachment) {
+    public PendingSendResponse queueSend(EmailAccount account, SendEmailRequest request, List<MultipartFile> attachments) {
         Instant expiresAt = Instant.now().plusSeconds(SEND_DELAY_SECONDS);
 
-        // CRITICAL: MultipartFile is HTTP-request-scoped. Copy the bytes NOW,
-        // before the request ends and the stream is closed.
-        byte[] attachmentBytes = null;
-        String attachmentName = null;
-        String attachmentContentType = null;
-        if (attachment != null && !attachment.isEmpty()) {
-            try {
-                attachmentBytes = attachment.getBytes();
-                attachmentName = attachment.getOriginalFilename() != null
-                        ? attachment.getOriginalFilename() : "attachment.pdf";
-                attachmentContentType = attachment.getContentType() != null
-                        ? attachment.getContentType() : "application/pdf";
-            } catch (IOException e) {
-                log.error("[UndoSend] Failed to read attachment bytes: {}", e.getMessage());
-                // Continue without attachment rather than failing the whole send
+        // CRITICAL: MultipartFile is HTTP-request-scoped. Copy ALL bytes NOW,
+        // before the request ends and streams are closed.
+        List<BytesBackedMultipartFile> safeAttachments = new ArrayList<>();
+        if (attachments != null) {
+            for (MultipartFile attachment : attachments) {
+                if (attachment == null || attachment.isEmpty()) continue;
+                try {
+                    String name = attachment.getOriginalFilename() != null
+                            ? attachment.getOriginalFilename() : "attachment";
+                    String ct = attachment.getContentType() != null
+                            ? attachment.getContentType() : "application/octet-stream";
+                    safeAttachments.add(new BytesBackedMultipartFile("attachment", name, ct, attachment.getBytes()));
+                } catch (IOException e) {
+                    log.error("[UndoSend] Failed to read attachment bytes: {}", e.getMessage());
+                }
             }
         }
+
+        // Serialize all attachments into the single DB blob column.
+        byte[] serialized = serializeAttachments(safeAttachments);
+        String firstFilename = safeAttachments.isEmpty() ? null : safeAttachments.get(0).getOriginalFilename();
+        String firstContentType = safeAttachments.isEmpty() ? null : safeAttachments.get(0).getContentType();
 
         // Persist first so a crash before the schedule fires is still recoverable.
         UUID sendId = UUID.randomUUID();
@@ -107,26 +116,22 @@ public class ScheduledSendService {
                 .bodyText(request.bodyText())
                 .bodyHtml(request.bodyHtml())
                 .inReplyTo(request.inReplyTo())
-                .attachmentBytes(attachmentBytes)
-                .attachmentFilename(attachmentName)
-                .attachmentContentType(attachmentContentType)
+                .attachmentBytes(serialized)
+                .attachmentFilename(firstFilename)
+                .attachmentContentType(firstContentType)
                 .sendAt(LocalDateTime.now(ZoneOffset.UTC).plusSeconds(SEND_DELAY_SECONDS))
                 .status(PendingSend.PENDING)
                 .createdAt(LocalDateTime.now(ZoneOffset.UTC))
                 .build();
         pendingSendRepository.save(row);
 
-        MultipartFile safeAttachment = attachmentBytes != null
-                ? new BytesBackedMultipartFile("attachment", attachmentName, attachmentContentType, attachmentBytes)
-                : null;
-
         ScheduledFuture<?> future = scheduler.schedule(
-                () -> deliver(sendId, account, request, safeAttachment),
+                () -> deliver(sendId, account, request, safeAttachments),
                 SEND_DELAY_SECONDS, TimeUnit.SECONDS);
 
         pendingMap.put(sendId, new PendingEntry(future, account, request));
-        log.info("[UndoSend] Queued send {} for {} — expires at {}",
-                sendId, account.getEmailAddress(), expiresAt);
+        log.info("[UndoSend] Queued send {} for {} — {} attachment(s) — expires at {}",
+                sendId, account.getEmailAddress(), safeAttachments.size(), expiresAt);
 
         return PendingSendResponse.queued(sendId, expiresAt);
     }
@@ -188,11 +193,11 @@ public class ScheduledSendService {
 
     // ── Delivery ─────────────────────────────────────────────────────────────
 
-    /** Fast path: deliver using the in-memory account/request/attachment. */
-    private void deliver(UUID sendId, EmailAccount account, SendEmailRequest request, MultipartFile attachment) {
+    /** Fast path: deliver using the in-memory account/request/attachments. */
+    private void deliver(UUID sendId, EmailAccount account, SendEmailRequest request, List<BytesBackedMultipartFile> attachments) {
         try {
             if (pendingSendRepository.markSentIfPending(sendId) == 1) {
-                sendService.sendEmail(account, request, attachment);
+                sendService.sendEmail(account, request, new ArrayList<>(attachments));
                 log.info("[UndoSend] Delivered send {} for {}", sendId, account.getEmailAddress());
             } else {
                 log.debug("[UndoSend] Send {} already sent/cancelled — skipping", sendId);
@@ -221,15 +226,8 @@ public class ScheduledSendService {
                 ps.getToAddress(), split(ps.getCcAddresses()), split(ps.getBccAddresses()),
                 ps.getSubject(), ps.getBodyHtml(), ps.getBodyText(), ps.getInReplyTo());
 
-        MultipartFile attachment = null;
-        if (ps.getAttachmentBytes() != null && ps.getAttachmentBytes().length > 0) {
-            attachment = new BytesBackedMultipartFile(
-                    "attachment",
-                    ps.getAttachmentFilename() != null ? ps.getAttachmentFilename() : "attachment.pdf",
-                    ps.getAttachmentContentType() != null ? ps.getAttachmentContentType() : "application/octet-stream",
-                    ps.getAttachmentBytes());
-        }
-        deliver(sendId, account, request, attachment);
+        List<BytesBackedMultipartFile> attachments = deserializeAttachments(ps.getAttachmentBytes());
+        deliver(sendId, account, request, attachments);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -240,6 +238,57 @@ public class ScheduledSendService {
 
     private static List<String> split(String joined) {
         return (joined == null || joined.isBlank()) ? null : Arrays.asList(joined.split(";"));
+    }
+
+    /**
+     * Serialize a list of in-memory attachments to a single byte[] for DB storage.
+     * Format (DataOutputStream big-endian):
+     *   int count
+     *   for each:
+     *     int nameLen, UTF name bytes
+     *     int ctLen,   UTF contentType bytes
+     *     int dataLen, data bytes
+     */
+    private static byte[] serializeAttachments(List<BytesBackedMultipartFile> list) {
+        if (list == null || list.isEmpty()) return null;
+        try (ByteArrayOutputStream bos = new ByteArrayOutputStream();
+             DataOutputStream dos = new DataOutputStream(bos)) {
+            dos.writeInt(list.size());
+            for (BytesBackedMultipartFile f : list) {
+                byte[] nameB = f.getOriginalFilename().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                byte[] ctB   = f.getContentType().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                byte[] data  = f.getBytes();
+                dos.writeInt(nameB.length); dos.write(nameB);
+                dos.writeInt(ctB.length);   dos.write(ctB);
+                dos.writeInt(data.length);  dos.write(data);
+            }
+            dos.flush();
+            return bos.toByteArray();
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /** Inverse of {@link #serializeAttachments}. Returns empty list if blob is null/corrupt. */
+    private static List<BytesBackedMultipartFile> deserializeAttachments(byte[] blob) {
+        List<BytesBackedMultipartFile> result = new ArrayList<>();
+        if (blob == null || blob.length == 0) return result;
+        try (DataInputStream dis = new DataInputStream(new ByteArrayInputStream(blob))) {
+            int count = dis.readInt();
+            for (int i = 0; i < count; i++) {
+                int nameLen = dis.readInt(); byte[] nameB = dis.readNBytes(nameLen);
+                int ctLen   = dis.readInt(); byte[] ctB   = dis.readNBytes(ctLen);
+                int dataLen = dis.readInt(); byte[] data  = dis.readNBytes(dataLen);
+                result.add(new BytesBackedMultipartFile(
+                        "attachment",
+                        new String(nameB, java.nio.charset.StandardCharsets.UTF_8),
+                        new String(ctB,   java.nio.charset.StandardCharsets.UTF_8),
+                        data));
+            }
+        } catch (IOException e) {
+            // Corrupt blob — fall back to legacy single-attachment format handled below
+        }
+        return result;
     }
 
     private record PendingEntry(

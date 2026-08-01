@@ -43,11 +43,6 @@ public class EmailSendService {
         sendEmail(account, request, (List<MultipartFile>) null);
     }
 
-    /** Single-file convenience overload — wraps in a list. */
-    public void sendEmail(EmailAccount account, SendEmailRequest request, MultipartFile attachment) {
-        sendEmail(account, request, attachment != null ? List.of(attachment) : null);
-    }
-
     /**
      * Send an email with zero or more file attachments.
      *

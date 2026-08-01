@@ -17,8 +17,11 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import java.util.List;
+import org.springframework.web.multipart.MultipartFile;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 class ScheduledSendServiceTest {
@@ -92,7 +95,7 @@ class ScheduledSendServiceTest {
 
             assertEquals("cancelled", cancelled.status());
             assertFalse(scheduledSendService.isPending(queued.sendId()));
-            verify(sendService, never()).sendEmail(any(), any(), any());
+            verify(sendService, never()).sendEmail(any(), any(), ArgumentMatchers.<List<MultipartFile>>any());
         }
 
         @Test
@@ -121,7 +124,7 @@ class ScheduledSendServiceTest {
 
             Thread.sleep(12_000);
 
-            verify(sendService, times(1)).sendEmail(eq(testAccount), eq(request), isNull());
+            verify(sendService, times(1)).sendEmail(eq(testAccount), eq(request), ArgumentMatchers.<List<MultipartFile>>isNull());
             assertFalse(scheduledSendService.isPending(queued.sendId()));
         }
     }
@@ -157,7 +160,7 @@ class ScheduledSendServiceTest {
             scheduledSendService.recoverPendingSends();
             Thread.sleep(1_200);
 
-            verify(sendService, times(1)).sendEmail(eq(testAccount), any(), isNull());
+            verify(sendService, times(1)).sendEmail(eq(testAccount), any(), ArgumentMatchers.<List<MultipartFile>>isNull());
         }
 
         @Test
@@ -174,7 +177,7 @@ class ScheduledSendServiceTest {
             scheduledSendService.recoverPendingSends();
             Thread.sleep(1_200);
 
-            verify(sendService, never()).sendEmail(any(), any(), any());
+            verify(sendService, never()).sendEmail(any(), any(), ArgumentMatchers.<List<MultipartFile>>any());
         }
 
         @Test
